@@ -1,6 +1,8 @@
-# herdr API notes (verified against herdr 0.7.5)
+# herdr API notes (verified against herdr 0.7.5, plus a 0.8.0 Windows sweep)
 
-The herdr surface herdr-reviewr depends on, confirmed live (last sweep 2026-07-31).
+The herdr surface herdr-reviewr depends on, confirmed live (last unix sweep 2026-07-31 on 0.7.5).
+The Socket API and Windows sections are a separate 2026-08-14 sweep on 0.8.0, and record surface
+reviewr does not use yet; every section carries the date and version it was verified under.
 herdr-reviewr ships as a herdr **plugin** (`../herdr-plugin.toml`), and the binary is a plain
 terminal program: any pane that runs it is a reviewr pane (`../specs/herdr-host.md`).
 
@@ -165,6 +167,73 @@ reviewer never saw. reviewr logs the whole payload and shows a sentence of its o
 - `pane send-text` writes the literal bytes to the pane without Enter, unchanged since 0.7.0.
 - herdr 0.7.5 removed `agent send` (replaced by the logical-key `agent send-keys`). On 0.7.0 both
   commands dispatched to the same server write, so `pane send-text` covers the whole range.
+
+## Socket API (verified 2026-08-14 against herdr 0.8.0, Windows 11)
+
+Nothing in reviewr uses this yet: every herdr call is a CLI subprocess (`../src/herdr.rs`,
+`../herdr/pane.sh`). Recorded because the CLI is a thin client over it — `herdr --help` labels the
+`workspace`/`worktree`/`tab`/`agent`/`pane` groups "helpers over the socket API", and a CLI response
+carries `id: "cli:<method>"`, so the shapes above are already socket shapes.
+
+- **The schema ships with the binary.** `herdr api schema` prints `protocol: 20`,
+  `schema_version: 1`, and the five schemas `request`, `success_response`, `error_response`, `event`,
+  `subscription_event`. `herdr api schema --json` writes the full 265 KB document to stdout
+  (`--output PATH` also exists). `herdr api snapshot` prints the live session snapshot.
+- **91 request methods.** Everything reviewr shells out for is there: `agent.list`, `pane.send_text`,
+  `agent.focus`, `pane.rename`, `tab.list`, `plugin.pane.open`, `pane.close`, `pane.list`,
+  `pane.process_info`, `tab.rename`. Plus `ping`, `session.snapshot`, `events.subscribe`, and
+  `events.wait`. Event names include `pane.agent_status_changed`, which is what turn tracking polls
+  for today (`../specs/herdr-host.md` Non-goals rules out subscribing).
+- **Envelope**: newline-delimited JSON, `{"id","method","params"}` → `{"id","result"}` or
+  `{"id","error"}`. `params` is required, `{}` when empty.
+
+  ```json
+  {"id":"1","method":"ping","params":{}}
+  {"id":"1","result":{"type":"pong","version":"0.8.0","protocol":20,
+    "capabilities":{"live_handoff":false,"detached_server_daemon":true}}}
+  ```
+
+- **One request per connection.** The server answers, then closes: a second write on the same
+  connection fails with a broken pipe. Every call reconnects. `events.subscribe` is presumably the
+  exception that holds a connection open — not probed.
+- **`HERDR_SOCKET_PATH` is not the socket on Windows.** It names a 25-byte regular file holding
+  `<server-pid>:<start-time>` (`55656:1786699276287898300`, matching the live `herdr` process), a
+  liveness marker. The channel is a **named pipe whose name is that same path**, so the openable
+  path is `\\.\pipe\` + `$HERDR_SOCKET_PATH`. There is a sibling `herdr-client.sock` in the same
+  shape. The pid is not a port: TCP to it is refused.
+- **Reachable from `std` alone**, no crate and no `unsafe`, on either platform. On Windows a named
+  pipe opens as a file:
+
+  ```rust
+  let path = format!(r"\\.\pipe\{}", std::env::var("HERDR_SOCKET_PATH")?);
+  let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+  writeln!(f, "{request}")?;               // then read one line back
+  ```
+
+  On unix the same path is an `AF_UNIX` socket (`std::os::unix::net::UnixStream`) — not probed here.
+- **Round-trip cost, socket versus subprocess** (release build, 50 and 20 iterations):
+
+  ```
+  socket  agent.list          0.46 ms/call      CLI  agent list          20.60 ms/call
+  socket  pane.process_info   0.55 ms/call      CLI  pane process-info   33.26 ms/call
+  ```
+
+  The 60× gap on `process_info` is why `../herdr/pane.sh` probes panes concurrently through marker
+  files; a sequential socket sweep is cheaper than that machinery.
+
+## Windows platform differences (verified 2026-08-14 against herdr 0.8.0)
+
+- **`pane list` omits `foreground_cwd`.** Only `cwd` is present, so the live-cwd repo discovery in
+  `../herdr/pane.sh` (added 2026-08-12) finds nothing and falls back to the plugin context's
+  `focused_pane_cwd`. The fallback is unverified.
+- **`process_info.cwd` carries a trailing separator** (`"D:\\workspace\\prj\\work\\repo\\"`), where
+  `agent list` and `pane current` report `cwd` without one. Both feed `git -C` harmlessly.
+- **`argv0` echoes the launch spelling, `.exe` and all.** A `claude` pane launched through a shim
+  reports `argv0: "claude"` with `name: "claude.exe"`, so `name` remains the wrong key (as on unix,
+  above) and `argv0` may or may not carry the suffix depending on how the pane was launched. A
+  reviewr pane's real spelling is unverified — see `plans/2026-08-14-windows-support/plan.md` (B1).
+- **Plugin install is untested.** `../herdr-plugin.toml` declares `platforms = ["macos", "linux"]`,
+  so whether herdr's gate refuses the install is unknown.
 
 ## Diff scopes (plain git, no herdr)
 
