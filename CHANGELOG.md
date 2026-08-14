@@ -16,9 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Copying non-ASCII comments on Windows.** Copy writes the clipboard directly instead of piping
   through `clip.exe`, which decoded the pipe with the console codepage and mangled Korean and
   other non-Latin comments on any console not set to UTF-8.
-- **Opening PR links on Windows.** A link handed to the default browser now opens instead of
-  failing to find an opener, and a URL containing `&` or `%` opens as its own bytes because no
-  command processor parses it.
+- **Opening links on Windows.** A link now opens in the default browser instead of failing to
+  find an opener. The destination goes straight to the shell's protocol association, so a URL
+  carrying a query string, `&`, or `%` opens as its own bytes — where a command processor would
+  have expanded it and Windows Explorer would have quietly opened a folder window instead.
 - **Azure DevOps on Windows.** The `PR` tab finds `az` when the Azure CLI ships it as `az.cmd`.
 
 ## [0.30.4] — 2026-08-13

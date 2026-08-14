@@ -1,8 +1,10 @@
 //! Open a URL in the user's browser — the `PR` tab's only outward action.
 //!
-//! See `specs/forge-host.md` (external links). Mirrors the clipboard-tool probe in
-//! `export.rs`: the first platform opener on `PATH` wins; none present errors clearly.
+//! See `specs/markdown.md` (links). Unix mirrors the clipboard-tool probe in `export.rs`: the
+//! first platform opener on `PATH` wins, and none present errors clearly. Windows has no such
+//! program to probe and calls the shell association directly, the same split `export.rs` makes.
 
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -11,72 +13,51 @@ use anyhow::{Context, Result};
 #[cfg(not(windows))]
 const OPENERS: &[&str] = &["open", "xdg-open"];
 
-/// Whether a non-zero exit from the opener means the URL did not open.
-///
-/// True on unix: `open` and `xdg-open` both report the handoff. False on Windows, where
-/// `explorer.exe` routinely exits non-zero on a perfectly successful open, so believing it would
-/// turn every working link into a failure on the status line.
+/// Open `url` in the default browser via the first available opener. Errors when none is on
+/// `PATH` (the caller surfaces it to the status line). The opener hands the URL to the browser
+/// and exits at once, so this waits for it — reaping the child rather than leaving a zombie, and
+/// returning fast enough for a click handler (mirrors the codebase's synchronous tool calls).
 #[cfg(not(windows))]
-const EXIT_STATUS_REPORTS_DELIVERY: bool = true;
-#[cfg(windows)]
-const EXIT_STATUS_REPORTS_DELIVERY: bool = false;
-
-/// The command that hands `url` to the platform's browser, and the tool's name for messages.
-/// Errors only when no opener exists — on unix, when none of `OPENERS` is on `PATH`.
-#[cfg(not(windows))]
-fn opener_command(url: &str) -> Result<(Command, &'static str)> {
+pub fn open(url: &str) -> Result<()> {
     let tool = OPENERS
         .iter()
         .copied()
         .find(|t| crate::proc::on_path(t))
         .context("no URL opener found (need `open` or `xdg-open`)")?;
-    let mut cmd = Command::new(tool);
-    cmd.arg(url);
-    Ok((cmd, tool))
-}
-
-/// Windows has no `open`/`xdg-open` equivalent on `PATH`: `start` is a command-processor builtin,
-/// not a program, so no `PATH` probe can ever find it. `explorer.exe` is the shipped-everywhere
-/// program that hands a URL to the shell's protocol association — the user's default browser.
-///
-/// Deliberately not `cmd /C start`: a forge-supplied URL carries `%` percent-encoding and `&`,
-/// which the command processor expands and splits on before the browser sees them. Spawning
-/// `explorer.exe` directly passes the URL as one argv entry with no shell in the path.
-/// `openable_url` remains the single gate, so only vetted `http(s)` ever reaches here.
-/// See `specs/markdown.md` (links): the destination reaches the opener as one argument.
-#[cfg(windows)]
-// The `Result` never carries an error here, because Windows has exactly one opener and it always
-// exists. It stays so both platforms present one signature to `open`, which would otherwise need
-// its own `cfg` split for a difference callers do not have.
-#[allow(clippy::unnecessary_wraps)]
-fn opener_command(url: &str) -> Result<(Command, &'static str)> {
-    let mut cmd = Command::new("explorer.exe");
-    cmd.arg(url);
-    Ok((cmd, "explorer.exe"))
-}
-
-/// Open `url` in the default browser via the platform opener. Errors when none is available (the
-/// caller surfaces it to the status line). The opener hands the URL to the browser and exits at
-/// once, so this waits for it — reaping the child rather than leaving a zombie, and returning
-/// fast enough for a click handler (mirrors the codebase's synchronous tool calls).
-pub fn open(url: &str) -> Result<()> {
-    let (mut cmd, tool) = opener_command(url)?;
-    let status = cmd
+    let status = Command::new(tool)
+        .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .with_context(|| format!("spawning {tool}"))?;
-    if open_failed(status.success()) {
+    if !status.success() {
         anyhow::bail!("{tool} failed to open the URL");
     }
     Ok(())
 }
 
-/// Whether a finished opener means the URL did not open. A clean exit is never a failure; a dirty
-/// one is a failure only where the exit status carries that meaning.
-fn open_failed(succeeded: bool) -> bool {
-    EXIT_STATUS_REPORTS_DELIVERY && !succeeded
+/// Open `url` in the default browser through the Windows shell's protocol association.
+///
+/// Windows has no `open`/`xdg-open` equivalent to spawn: `start` is a command-processor builtin,
+/// not a program, so no `PATH` probe can find it. Every subprocess route puts a parser between
+/// reviewr and the URL, and a forge URL carries exactly what those parsers mishandle. Two were
+/// measured on Windows 11 and rejected:
+///
+/// - `cmd /C start` hands the destination to the command processor, which expands `%…%` and
+///   splits on `&`.
+/// - `explorer.exe` takes the URL but applies its own path-or-URL heuristic. Any query string
+///   defeats it: `https://example.com/?x=1` silently opens a folder window instead of the link,
+///   and its exit status reports success either way, so nothing can detect it.
+///
+/// `ShellExecuteW` is the association itself. The destination reaches it as one wide string with
+/// no command line anywhere, so no parser can reinterpret it, and its documented result is a
+/// genuine delivery signal rather than a process exit code. `openable_url` remains the single
+/// gate, so only vetted `http(s)` ever arrives here.
+/// See `specs/markdown.md` (links).
+#[cfg(windows)]
+pub fn open(url: &str) -> Result<()> {
+    opener::open(url).with_context(|| format!("opening {url} in the default browser"))
 }
 
 /// Gate a markdown link destination before it reaches the OS opener
@@ -96,30 +77,10 @@ pub fn openable_url(url: &str) -> Result<&str, &'static str> {
 mod tests {
     use super::openable_url;
 
-    /// A URL carrying every byte a shell would reinterpret: `%` percent-encoding, `&`, `?`, `^`.
-    const HOSTILE_TO_A_SHELL: &str = "https://ci.example/a%20b?x=1&y=2^3&%PATH%";
-
-    #[cfg(windows)]
-    #[test]
-    fn the_windows_opener_hands_the_url_to_the_shell_handler_untouched() {
-        let (cmd, name) = super::opener_command(HOSTILE_TO_A_SHELL).expect("an opener");
-        assert_eq!(name, "explorer.exe");
-        assert_eq!(cmd.get_program(), "explorer.exe");
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        // One argv entry, byte for byte. Routing this through `cmd /C start` would let the
-        // command processor expand `%PATH%` and split on `&` before the browser ever saw it.
-        assert_eq!(args, vec![HOSTILE_TO_A_SHELL.to_string()]);
-    }
-
-    #[test]
-    fn only_a_platform_whose_exit_status_means_delivery_reports_a_dirty_exit_as_failure() {
-        // A clean exit is a success everywhere.
-        assert!(!super::open_failed(true));
-        // A dirty one is a failure on unix, where `open`/`xdg-open` report the handoff. On
-        // Windows `explorer.exe` exits non-zero on plain successful opens, so believing it would
-        // turn every working link into a failed one on the status line.
-        assert_eq!(super::open_failed(false), cfg!(not(windows)));
-    }
+    // The Windows opener has no unit test: it is one `ShellExecuteW` call, and the only way to
+    // observe it is a browser window. What a test could have pinned — that no shell and no
+    // command line stand between reviewr and the destination — the call shape now guarantees.
+    // The acceptance check is manual (`docs/qa-scopes.md`, 브라우저 열기).
 
     #[test]
     fn the_url_guard_admits_http_and_https_case_insensitively() {

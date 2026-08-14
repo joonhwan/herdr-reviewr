@@ -27,14 +27,21 @@ toml = "1.1"
 two-face = "0.5.1"
 unicode-width = "0.2"
 
-# Windows-only. The clipboard is the one export target with no subprocess worth spawning there:
-# `clip.exe` decodes stdin with the shared console codepage (it corrupts Korean text on cp949) and
-# `powershell -Command Set-Clipboard` loses non-ASCII across the argv boundary besides costing
-# ~250 ms. This calls the clipboard API directly at ~0.3 ms. Gated by target so no unix dependency
-# graph changes; the crate's own `unsafe` is its business, since `unsafe_code = "forbid"` is
-# per-crate.
+# Windows-only. Both replace a subprocess unix can spawn and Windows cannot do safely, and both
+# fail the same way when forced: some parser between reviewr and the payload rewrites it. Gated by
+# target so no unix dependency graph changes. Their own `unsafe` is their business, since
+# `unsafe_code = "forbid"` is per-crate.
+#
+# clipboard-win: `clip.exe` decodes stdin with the shared console codepage (it corrupts Korean
+# text on cp949) and `powershell -Command Set-Clipboard` loses non-ASCII across the argv boundary
+# besides costing ~250 ms. The clipboard API takes UTF-16 directly, at ~0.3 ms.
+#
+# opener: `ShellExecuteW`, the shell's protocol association. `cmd /C start` expands `%…%` and
+# splits on `&`; `explorer.exe` opens a folder window instead of the link whenever the URL carries
+# a query string, and reports success while doing it. Both measured on Windows 11.
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"
+opener = "0.8.5"
 
 [dev-dependencies]
 tempfile = "3"
