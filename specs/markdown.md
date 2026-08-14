@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-07-12
-Last edited: 2026-08-01
+Last edited: 2026-08-14
 ---
 
 # Markdown rendering
@@ -70,6 +70,8 @@ The PR tab's description and comment bodies (`pr-tab.md`) and the markdown previ
 - A `#anchor` destination scrolls its own surface to the matching heading instead. Headings anchor by their GitHub slug, duplicates numbered.
 - Only an `http://` or `https://` destination opens in the browser, matched case-insensitively on the trimmed destination. Any other destination — an unknown scheme, a missing anchor, a control or bidi character anywhere — is inert.
 - Every destination that opens is exactly the text shown.
+- The destination reaches the platform opener as one argument. No command processor parses it, so a destination carrying `&` or `%` opens as its own bytes.
+- Windows reports the open once the handoff succeeds. The opener's exit status never decides it.
 
 ### Input safety
 

@@ -92,7 +92,13 @@ fn az_json(
     args: &[&str],
     cancelled: &AtomicBool,
 ) -> Result<Value, AzError> {
-    let mut cmd = Command::new("az");
+    // Azure CLI ships as `az.cmd` on Windows, and `Command::new("az")` only ever tries `az.exe`
+    // — so the bare name spawns nothing there. Resolving through `PATHEXT` finds the launcher.
+    // Falling back to the bare name keeps unix byte-identical and still fails as `NoAz` when the
+    // tool is genuinely absent, which is what `run_provider` classifies on a not-found spawn.
+    let program =
+        crate::proc::resolve("az").map_or_else(|| "az".into(), std::path::PathBuf::into_os_string);
+    let mut cmd = Command::new(program);
     cmd.current_dir(repo).args(args).args(["--organization", org_url, "--output", "json"]);
     let stdout = crate::forge::run_provider(
         &mut cmd,

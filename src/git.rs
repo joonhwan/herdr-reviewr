@@ -1377,8 +1377,23 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let canonical = std::fs::canonicalize(repo.path()).unwrap();
-        assert_eq!(worktree_of(repo.path()), Worktree::Root(canonical));
+        assert_eq!(worktree_of(repo.path()), Worktree::Root(canonical_like_git(repo.path())));
+    }
+
+    /// `std::fs::canonicalize` as an oracle git can be compared against.
+    ///
+    /// On Windows it returns a verbatim path (`\\?\C:\…`) where git returns `C:/…`, and the two
+    /// spell the same directory but compare unequal — `Path` treats `\\?\C:` and `C:` as different
+    /// prefixes. Stripping the verbatim marker normalizes the oracle without consulting the code
+    /// under test; separators need no help, since `Path` equality compares components. On unix
+    /// there is nothing to strip.
+    fn canonical_like_git(path: &std::path::Path) -> std::path::PathBuf {
+        let canonical = std::fs::canonicalize(path).unwrap();
+        let spelled = canonical.to_string_lossy();
+        match spelled.strip_prefix(r"\\?\") {
+            Some(plain) => std::path::PathBuf::from(plain),
+            None => canonical.clone(),
+        }
     }
 
     #[test]

@@ -1,0 +1,9 @@
+# Line endings are LF in the repository and LF in every working tree, Windows included.
+#
+# Without this, a Windows checkout under `core.autocrlf=true` holds CRLF, and `rustfmt.toml` sets
+# `newline_style = "Unix"` — so `cargo fmt --check`, and therefore `just ci`, fails on every source
+# file before it reads a line of code. The shell scripts under `herdr/` and `scripts/` need LF to
+# run at all, and Rust itself is indifferent.
+#
+# `text=auto` still leaves detected binary files alone, so the prebuilt syntax dumps are untouched.
+* text=auto eol=lf

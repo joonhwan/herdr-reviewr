@@ -4,10 +4,15 @@
 //! diff snippet, then the text. Export is consume-on-success: the caller removes
 //! a comment only after `export` returns `Ok`.
 
+// The subprocess clipboard path is unix-only; Windows calls the clipboard API instead.
+#[cfg(not(windows))]
 use std::io::Write;
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+#[cfg(not(windows))]
+use anyhow::{Context, bail};
 
 use crate::herdr;
 use crate::model::Comment;
@@ -53,7 +58,9 @@ fn counted_comments(count: usize) -> String {
 
 /// A clipboard tool and the args that make it read stdin into the system clipboard. Tried in
 /// order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one of these
-/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 and Windows are roadmap.
+/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 is roadmap. Windows takes the
+/// API path below instead, so it has no tool list.
+#[cfg(not(windows))]
 const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
     ("pbcopy", &[]),
     ("wl-copy", &[]),
@@ -78,6 +85,7 @@ impl ExportTarget for Clipboard {
         "clipboard failed".to_string()
     }
 
+    #[cfg(not(windows))]
     fn export(&self, text: &str) -> Result<()> {
         let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(
             "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
@@ -99,9 +107,30 @@ impl ExportTarget for Clipboard {
         }
         Ok(())
     }
+
+    /// Windows writes through the clipboard API, not a subprocess.
+    ///
+    /// The tool-list shape cannot work here. `clip.exe` decodes its stdin with the **console
+    /// codepage** — a per-console resource reviewr shares with the agent and so must not mutate
+    /// — which silently corrupts every non-ASCII comment outside cp65001, and `Set-Clipboard`
+    /// loses the same bytes across the argv boundary. The API takes UTF-16 directly, so a
+    /// comment's own encoding is the only one involved.
+    ///
+    /// The clipboard is a single system-wide lock another program may hold for a moment, so the
+    /// open is retried rather than failed on first refusal. A failure keeps every comment: the
+    /// caller consumes only on `Ok` (`specs/review-model.md`).
+    #[cfg(windows)]
+    fn export(&self, text: &str) -> Result<()> {
+        let _owned = clipboard_win::Clipboard::new_attempts(10)
+            .map_err(|code| anyhow::anyhow!("opening the Windows clipboard: {code}"))?;
+        clipboard_win::set(clipboard_win::formats::Unicode, text)
+            .map_err(|code| anyhow::anyhow!("writing the Windows clipboard: {code}"))?;
+        Ok(())
+    }
 }
 
 /// The first clipboard tool the `present` predicate accepts, preserving list order.
+#[cfg(not(windows))]
 fn select_tool(
     tools: &'static [(&'static str, &'static [&'static str])],
     present: impl Fn(&str) -> bool,
@@ -149,11 +178,31 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Agent, CLIPBOARD_TOOLS, Clipboard, ExportTarget, format_all, format_comment, select_tool,
-    };
+    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment};
+    #[cfg(not(windows))]
+    use super::{CLIPBOARD_TOOLS, select_tool};
     use crate::model::{Comment, Side};
 
+    /// Windows exports through the clipboard API rather than a subprocess, so the text never
+    /// crosses a console codepage. This is the case that `clip.exe` mangles on a Korean Windows
+    /// (cp949) and that a `powershell -Command Set-Clipboard` argv mangles everywhere.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_clipboard_round_trips_non_ascii_text_and_line_breaks() {
+        let restore = clipboard_win::get_clipboard_string().ok();
+        let text = "리뷰 코멘트 — em dash + 한글\nsecond line";
+
+        Clipboard.export(text).expect("export to the Windows clipboard");
+        let back = clipboard_win::get_clipboard_string().expect("read the clipboard back");
+
+        // Leave the developer's clipboard as we found it before asserting.
+        if let Some(previous) = restore {
+            let _ = clipboard_win::set_clipboard_string(&previous);
+        }
+        assert_eq!(back, text);
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
         // None present -> no tool (the caller surfaces the "install one" error).

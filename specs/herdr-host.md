@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-13
+Last edited: 2026-08-14
 ---
 
 # herdr host
@@ -183,7 +183,7 @@ Actions:
 Send and tracking:
 
 - Browsing and the clipboard export work without the herdr CLI. Without it `last-turn` stays empty, `uncommitted` and `branch` are unaffected, and the plugin config goes unread unless `HERDR_PLUGIN_CONFIG_DIR` names it (`config.md`).
-- A failed clipboard utility or `herdr pane send-text` reports the error. The comments stay in the list.
+- A failed clipboard export or `herdr pane send-text` reports the error. The comments stay in the list.
 - A turn shorter than one poll interval, or one whose start is masked by a `blocked` or `unknown` report, is missed. `last-turn` then shows the changes since the last observed turn start, which is more than that turn wrote and never less.
 - An agent left `blocked` or `unknown` holds the worktree at neither for as long as it stays there, so no other agent in that worktree can start or end a turn meanwhile. Their work accumulates into the open turn's diff rather than being lost. Answering the prompt releases it: the next poll rests, ends the held turn, and the turn after that re-anchors the baseline. Distinguishing a bystander from the agent that was working needs per-agent turn identity, which `HH-TURN-PER-WORKTREE` trades away on purpose.
 - A crash mid-snapshot costs at most one failed refresh. Ref updates are atomic, and leftover locks clear before the next snapshot and on every exit path.

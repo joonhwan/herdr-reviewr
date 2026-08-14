@@ -4,7 +4,7 @@ No spec governs Windows yet. `herdr-plugin.toml` declares `platforms = ["macos",
 `src/proc.rs` states the assumption outright: "Both shipped platforms are unix." This plan records
 what a live Windows investigation established, and proposes the spec edits each phase needs.
 
-**Status: Draft.** Three decisions are still open (see Open decisions). Phase 1 is unblocked.
+**Status: Phase 1 landed.** D1 is decided. D2 and D3 remain open and gate Phases 2 and 3.
 
 ## Goal
 
@@ -105,6 +105,15 @@ background jobs with `wait`, `$'\n'` quoting, and `ln -sfn`. Three Windows defec
 subtle contracts (race-lost close converging, unreadable read refusing, shape-missing refusing, live
 cwd precedence). Its first line is `#![cfg(unix)]`, so **none of them compiles on Windows.**
 
+`tests/send_flow.rs` is `#![cfg(unix)]` too — corrected 2026-08-14, having been listed above as
+part of the passing integration run. It contributes 0 tests on Windows, so the integration total
+there is 367 from `app_flow`, `git_repo`, `render`, and `pr_candidates` alone. This matters more
+than `pane_actions`: Send is the export path a Windows user reaches without the plugin, and it is
+now unit-covered but not end-to-end covered. It is unix-only because it writes its fake herdr as a
+shell script through `PermissionsExt`. Porting it needs a fake herdr Windows can execute, which is
+the same problem Phase 2 item 4 solves for `pane_actions`, so it joins that item rather than
+Phase 1.
+
 ### herdr socket API
 
 herdr exposes a versioned socket API — protocol 20, schema_version 1, 91 request methods, full JSON
@@ -131,9 +140,9 @@ fork-and-collect dance.
 
 Each changes what gets built. None blocks Phase 1 except D1.
 
-- **D1 — clipboard mechanism.** `clipboard-win` behind a `cfg(windows)` gate is proposed above on
-  measured grounds. The alternative is shipping Phase 1 with no Windows clipboard and leaving Send
-  as the only export.
+- **D1 — clipboard mechanism. Decided 2026-08-14: `clipboard-win` behind a `cfg(windows)` gate.**
+  The rejected alternative was shipping Phase 1 with no Windows clipboard and leaving Send as the
+  only export. Landed in `src/export.rs`; the contract sits in `specs/review-model.md` (export).
 - **D2 — pane lifecycle strategy.** Depend on git-bash plus `jq`; port `pane.sh` to PowerShell; or
   lift its decision logic into the binary as a subcommand, extending the `--resolve-plugin-config`
   precedent so one entry point serves every platform. The socket findings favor the third: bash,
@@ -175,8 +184,9 @@ scopes.
 2. Implement D2, resolving B1 and B2.
 3. `herdr-plugin.toml`: add `"windows"` to `platforms`, and give the pane a launch command that
    needs no POSIX shell.
-4. Port the 28 `pane_actions` tests off `#![cfg(unix)]`. Under D2's third option the fake herdr
-   becomes a test binary reached through `HERDR_BIN_PATH`, which `src/herdr.rs:78` already honors.
+4. Port the 28 `pane_actions` tests and the `send_flow` suite off `#![cfg(unix)]`. Under D2's third
+   option the fake herdr becomes a test binary reached through `HERDR_BIN_PATH`, which
+   `src/herdr.rs:78` already honors, and one such binary serves both suites.
 
 **Done when:** toggle/open/close and the `worktree.created` event behave per
 `specs/herdr-host.md` on Windows; the pane-identity tests run on all three platforms; a second
@@ -203,8 +213,9 @@ Written when the phase lands, not before — several are still open decisions.
 
 | spec                     | change                                                                                                     |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `specs/input.md`         | The clipboard decision from D1, as one decision naming what it forbids.                                    |
-| `specs/forge-host.md`    | External links open through a per-platform opener.                                                          |
+| `specs/review-model.md`  | **Landed.** The clipboard decision from D1. Not `specs/input.md`, which only maps the `copy` keybinding — the export contract lives with the review model. |
+| `specs/markdown.md`      | **Landed.** A destination reaches the opener as one argument, and the Windows open reports on handoff. Not `specs/forge-host.md`, which never states how a link opens. |
+| `specs/herdr-host.md`    | **Landed.** "clipboard utility" reworded to "clipboard export", since Windows spawns no utility. |
 | `specs/herdr-host.md`    | Pane identity tolerating an executable suffix; install paths on a platform without usable symlinks. D3 if the non-goal is revisited. |
 | `specs/forge-providers.md` | Only if `az` resolution turns out to be a stated contract rather than an implementation detail.           |
 

@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-08
+Last edited: 2026-08-14
 ---
 
 # Review model
@@ -142,6 +142,7 @@ why drop this? it is still needed
 
 - Send injects every block into the agent input, focuses the agent pane, and clears the list. It never submits (paste framing: `herdr-host.md`).
 - Copy writes the same blocks to the system clipboard, then clears the list.
+- Copy carries the blocks' own bytes to the clipboard. No console encoding stands between them, so a comment in any script arrives as written.
 
 How the agent pane is found and filled is in `herdr-host.md`.
 

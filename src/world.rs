@@ -397,10 +397,17 @@ mod tests {
     fn only_an_absolute_cwd_can_name_a_worktree() {
         // A blank or relative cwd would resolve against reviewr's own cwd (the reviewed
         // worktree), so membership must reject it before any git call (specs/herdr-host.md).
-        assert_eq!(worktree_cwd(Some("/abs/path")), Some("/abs/path"));
+        // "Absolute" is the platform's own judgement, so the accepted spelling differs: herdr
+        // reports a native cwd (`D:\workspace\…` on Windows, `/home/…` on unix).
+        let absolute = if cfg!(windows) { r"C:\abs\path" } else { "/abs/path" };
+        assert_eq!(worktree_cwd(Some(absolute)), Some(absolute));
         assert_eq!(worktree_cwd(Some("relative/path")), None);
         assert_eq!(worktree_cwd(Some("")), None);
         assert_eq!(worktree_cwd(None), None);
+        // A rooted path with no drive is relative on Windows — it resolves against the current
+        // drive — so it must be refused there exactly like any other relative cwd.
+        #[cfg(windows)]
+        assert_eq!(worktree_cwd(Some("/abs/path")), None);
     }
 
     #[test]
