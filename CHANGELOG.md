@@ -16,6 +16,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the first one opened, rather than stacking another beside it.
 
 ### Fixed
+- **Closing and toggling a reviewr pane on Windows when the workspace holds several panes.** The
+  actions read the pane list through `jq`, whose Windows build ends every line with CRLF, so every
+  pane but the last was inspected under an id carrying a stray carriage return and read as "not a
+  reviewr pane". A close would walk past the pane it meant to close, and a toggle would stack a
+  second pane beside the first instead of closing it.
 - **Copying non-ASCII comments on Windows.** Copy writes the clipboard directly instead of piping
   through `clip.exe`, which decoded the pipe with the console codepage and mangled Korean and
   other non-Latin comments on any console not set to UTF-8.

@@ -1,7 +1,4 @@
-#![cfg(unix)]
-
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -9,56 +6,52 @@ fn reviewr_bin() -> &'static str {
     env!("CARGO_BIN_EXE_herdr-reviewr")
 }
 
-/// A fake herdr, answering in the live 0.7.5 envelope shapes (docs/herdr-api-notes.md).
-/// `pane list` serves `panes.json` (else one plain pane), `pane process-info` serves the
-/// per-pane `procinfo-<id>.json` (else a plain shell, which is not a reviewr pane) or fails
-/// with `procfail-<id>.json` on stderr, `pane close` succeeds unless `closefail-<id>`
-/// exists (whose content becomes the failure's stderr), `plugin config-dir` names the
-/// fixture dir itself (after a 5s hang when `configdir-hang` exists), and everything else
-/// answers as a successful `plugin pane open`.
+/// A pane id spelled as a fixture filename. Windows forbids `:` in a path, and forbids it
+/// silently: `fs::write` on `procinfo-w1:p1.json` reports success while writing an NTFS
+/// alternate data stream behind `procinfo-w1`, which no shell then finds. Every fixture keyed
+/// by a pane id goes through here, and the fake below folds the same way.
+fn fixture_key(pane: &str) -> String {
+    pane.replace(':', "-")
+}
+
+/// `pane.sh` launched the way `herdr-plugin.toml` launches it: through `sh`, never by naming
+/// `bash`. herdr resolves a command's first word on PATH, and on Windows that reaches
+/// `C:\Windows\system32\bash.exe` — the WSL launcher, a separate filesystem namespace that
+/// receives none of the HERDR_* variables. Inside `sh`, `bash` is that shell's own bash.
+fn pane_sh(mode: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.args(["-c", &format!("exec bash herdr/pane.sh {mode}")]);
+    command
+}
+
+/// The fake herdr both `pane.sh` and the review binary reach through `HERDR_BIN_PATH`, and the
+/// log it records every call in. It answers from fixture files laid down in `dir`; its whole
+/// contract is in `tests/support/fake_herdr.rs`.
+///
+/// A binary rather than the shell script this used to write and `chmod 755`, which is what made
+/// the file `#![cfg(unix)]`. Two of the tests below spawn the review binary directly, and
+/// `Command::new` on a `#!/bin/sh` file is not something Windows can do at all.
+///
+/// The existence check is the point of the `option_env!`: cargo defines
+/// `CARGO_BIN_EXE_fake-herdr` for a declared binary whether or not its required features let it
+/// build, so without the file itself every test here would fail somewhere far from the cause.
+const FAKE_HERDR: Option<&str> = option_env!("CARGO_BIN_EXE_fake-herdr");
+
 fn fake_herdr(dir: &Path) -> (PathBuf, PathBuf) {
-    let path = dir.join("herdr");
-    let log = dir.join("herdr.log");
-    fs::write(
-        &path,
-        format!(
-            concat!(
-                "#!/bin/sh\n",
-                "dir='{dir}'\n",
-                "printf '%s\\n' \"$*\" >> '{log}'\n",
-                "case \"$*\" in\n",
-                "  'pane list'*)\n",
-                "    if [ -f \"$dir/panes.json\" ]; then cat \"$dir/panes.json\";\n",
-                "    else printf '%s\\n' '{{\"result\":{{\"panes\":[{{\"pane_id\":\"w1:p1\"}}]}}}}'; fi ;;\n",
-                "  'pane process-info --pane '*)\n",
-                "    if [ -f \"$dir/procfail-$4.json\" ]; then cat \"$dir/procfail-$4.json\" >&2; exit 1; fi\n",
-                "    if [ -f \"$dir/procinfo-$4.json\" ]; then cat \"$dir/procinfo-$4.json\";\n",
-                "    else printf '%s\\n' '{{\"result\":{{\"process_info\":{{\"foreground_process_group_id\":7,\"foreground_processes\":[{{\"pid\":7,\"name\":\"zsh\",\"argv0\":\"zsh\",\"argv\":[\"-zsh\"],\"cwd\":\"/\"}}],\"pane_id\":\"'\"$4\"'\",\"shell_pid\":1}}}}}}'; fi ;;\n",
-                "  'pane close '*)\n",
-                "    if [ -f \"$dir/closefail-$3\" ]; then cat \"$dir/closefail-$3\" >&2; exit 1; fi\n",
-                "    printf '%s\\n' '{{\"result\":{{}}}}' ;;\n",
-                "  'plugin config-dir '*)\n",
-                "    if [ -f \"$dir/configdir-hang\" ]; then sleep 5; fi\n",
-                "    printf '%s\\n' \"$dir\" ;;\n",
-                "  *) printf '%s\\n' '{{\"result\":{{\"plugin_pane\":{{\"pane\":{{\"pane_id\":\"w1:p9\",\"tab_id\":\"w1:t9\"}}}}}}}}' ;;\n",
-                "esac\n",
-            ),
-            dir = dir.display(),
-            log = log.display()
-        ),
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).unwrap();
-    (path, log)
+    let bin = FAKE_HERDR.expect("cargo names every declared binary target");
+    assert!(
+        Path::new(bin).exists(),
+        "the fake herdr is not built: it sits behind the `test-support` feature — run \
+         `just test`, or `cargo test --features test-support --test pane_actions`",
+    );
+    (PathBuf::from(bin), dir.join("log"))
 }
 
 /// One `pane process-info` answer for `pane`: a foreground process group holding `entries`,
 /// in the live envelope shape (docs/herdr-api-notes.md).
 fn procinfo(dir: &Path, pane: &str, entries: &str) {
     fs::write(
-        dir.join(format!("procinfo-{pane}.json")),
+        dir.join(format!("procinfo-{}.json", fixture_key(pane))),
         format!(
             r#"{{"result":{{"process_info":{{"foreground_process_group_id":7,"foreground_processes":[{entries}],"pane_id":"{pane}","shell_pid":1}}}}}}"#
         ),
@@ -89,23 +82,32 @@ fn init_repo(dir: &Path, name: &str) -> PathBuf {
 /// One `pane list` answer: a single pane whose entry carries a live `foreground_cwd`,
 /// in the live envelope shape (docs/herdr-api-notes.md).
 fn pane_with_cwd(dir: &Path, pane: &str, foreground_cwd: &Path) {
+    panes_with_cwds(dir, &[(pane, foreground_cwd)]);
+}
+
+/// The same answer over several panes, in the order given. Built through `serde_json` rather
+/// than a format string: a Windows path is full of backslashes, and pasted raw into JSON each
+/// one opens an escape that `jq` then rejects — the whole listing would read as a failed
+/// `pane list` instead of the fixture it means to be.
+fn panes_with_cwds(dir: &Path, panes: &[(&str, &Path)]) {
+    let entries: Vec<serde_json::Value> = panes
+        .iter()
+        .map(|(pane, cwd)| serde_json::json!({"pane_id": pane, "foreground_cwd": cwd}))
+        .collect();
     fs::write(
         dir.join("panes.json"),
-        format!(
-            r#"{{"result":{{"panes":[{{"pane_id":"{pane}","foreground_cwd":"{cwd}"}}]}}}}"#,
-            cwd = foreground_cwd.display(),
-        ),
+        serde_json::json!({"result": {"panes": entries}}).to_string(),
     )
     .unwrap();
 }
 
 fn run(mode: &str, config_dir: &Path, herdr: &Path) -> Output {
-    Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg(mode)
+    pane_sh(mode)
         .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", config_dir)
         .env("HERDR_BIN_PATH", herdr)
+        .env("FAKE_HERDR_DIR", config_dir)
+        .env("HERDR_PLUGIN_ROOT", config_dir)
         .env("HERDR_WORKSPACE_ID", "workspace-1")
         .output()
         .unwrap()
@@ -119,13 +121,17 @@ fn run_open(config_dir: &Path, herdr: &Path) -> Output {
 }
 
 /// Any mode with a caller-shaped action context.
+///
+/// `HERDR_PLUGIN_ROOT` names the fixture directory, which holds no `bin/herdr-reviewr`: unix
+/// skips the stable-launch-path block on that test alone, so the links stay the subject of the
+/// one test that asserts them, while Windows still has a root to resolve its pane `PATH` from.
 fn run_with_context(mode: &str, config_dir: &Path, herdr: &Path, context: &str) -> Output {
-    Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg(mode)
+    pane_sh(mode)
         .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", config_dir)
         .env("HERDR_BIN_PATH", herdr)
+        .env("FAKE_HERDR_DIR", config_dir)
+        .env("HERDR_PLUGIN_ROOT", config_dir)
         .env("HERDR_WORKSPACE_ID", "workspace-1")
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_PLUGIN_CONTEXT_JSON", context)
@@ -198,12 +204,11 @@ fn valid_auto_open_runtime_refusal_remains_silent() {
     let dir = tempfile::tempdir().unwrap();
     let (herdr, log) = fake_herdr(dir.path());
 
-    let output = Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg("auto-open")
+    let output = pane_sh("auto-open")
         .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
         .env("HERDR_BIN_PATH", &herdr)
+        .env("FAKE_HERDR_DIR", dir.path())
         .env_remove("HERDR_WORKSPACE_ID")
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_PLUGIN_CONTEXT_JSON")
@@ -274,7 +279,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     // The sweep still exits 0 — the end state is the same (specs/herdr-host.md, Failure
     // semantics).
     fs::write(
-        dir.path().join("closefail-w1:p3"),
+        dir.path().join(format!("closefail-{}", fixture_key("w1:p3"))),
         r#"{"error":{"code":"pane_not_found","message":"pane w1:p3 not found"},"id":"cli:request"}"#,
     )
     .unwrap();
@@ -314,7 +319,7 @@ fn a_close_that_fails_for_a_live_pane_sweeps_the_rest_then_refuses() {
     // exited-between-read-and-close race. Reporting it closed would leave a running pane
     // the user believes gone, so the sweep refuses (specs/herdr-host.md, Failure semantics).
     fs::write(
-        dir.path().join("closefail-w1:p1"),
+        dir.path().join(format!("closefail-{}", fixture_key("w1:p1"))),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
     )
     .unwrap();
@@ -336,7 +341,7 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     // The read reports the pane gone: it exited between the list and the read, so the
     // action converges — this close has nothing to sweep and exits 0.
     fs::write(
-        dir.path().join("procfail-w1:p1.json"),
+        dir.path().join(format!("procfail-{}.json", fixture_key("w1:p1"))),
         r#"{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"},"id":"cli:request"}"#,
     )
     .unwrap();
@@ -347,7 +352,7 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     // Any other read failure refuses, never reads as "no reviewr pane": an open would
     // stack a duplicate and a close would false-succeed (specs/herdr-host.md).
     fs::write(
-        dir.path().join("procfail-w1:p1.json"),
+        dir.path().join(format!("procfail-{}.json", fixture_key("w1:p1"))),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
     )
     .unwrap();
@@ -362,8 +367,13 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     }
 }
 
+// The stable launch paths are a unix arrangement. Windows keeps none, and the test below this
+// one holds that half (specs/herdr-host.md, Install paths).
+#[cfg(unix)]
 #[test]
 fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = tempfile::tempdir().unwrap();
     let (herdr, _log) = fake_herdr(dir.path());
     // The install's build step runs in a staging checkout herdr renames afterwards, so the
@@ -378,12 +388,12 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     permissions.set_mode(0o755);
     fs::set_permissions(root.path().join("bin/herdr-reviewr"), permissions).unwrap();
     let run_close = |home: &Path| {
-        Command::new("bash")
-            .arg("herdr/pane.sh")
-            .arg("close")
+        pane_sh("close")
             .env("HERDR_REVIEWR_BIN", reviewr_bin())
             .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
             .env("HERDR_BIN_PATH", &herdr)
+            .env("FAKE_HERDR_DIR", dir.path())
+            .env("FAKE_HERDR_DIR", dir.path())
             .env("HERDR_WORKSPACE_ID", "workspace-1")
             .env("HERDR_PLUGIN_ROOT", root.path())
             .env("HOME", home)
@@ -409,6 +419,39 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     assert_eq!(fs::read_link(&bin_link).unwrap(), root.path().join("bin/herdr-reviewr"));
 }
 
+#[cfg(windows)]
+#[test]
+fn an_action_creates_no_stable_launch_path_on_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (herdr, _log) = fake_herdr(dir.path());
+    // A plugin root complete enough that unix would link it. Windows keeps no stable launch
+    // path: `ln -s` there needs Developer Mode or elevation and MSYS silently falls back to
+    // copying, and a copy is the one outcome the stable path exists to prevent — a stale build
+    // that keeps launching after an uninstall (specs/herdr-host.md, Install paths).
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("bin")).unwrap();
+    fs::write(root.path().join("bin/herdr-reviewr"), "#!/bin/sh\n").unwrap();
+
+    let output = pane_sh("close")
+        .env("HERDR_REVIEWR_BIN", reviewr_bin())
+        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
+        .env("HERDR_BIN_PATH", &herdr)
+        .env("FAKE_HERDR_DIR", dir.path())
+        .env("HERDR_WORKSPACE_ID", "workspace-1")
+        .env("HERDR_PLUGIN_ROOT", root.path())
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        !home.path().join(".local").exists(),
+        "windows must leave no link and no copy behind: {}",
+        home.path().display()
+    );
+}
+
 #[test]
 fn a_process_info_answer_missing_its_shape_refuses() {
     let dir = tempfile::tempdir().unwrap();
@@ -416,7 +459,7 @@ fn a_process_info_answer_missing_its_shape_refuses() {
     // Exit 0 with an error envelope — no `.result.process_info.foreground_processes`. A
     // shape failure must refuse like a failed pane list, never read as "no reviewr pane".
     fs::write(
-        dir.path().join("procinfo-w1:p1.json"),
+        dir.path().join(format!("procinfo-{}.json", fixture_key("w1:p1"))),
         r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#,
     )
     .unwrap();
@@ -468,6 +511,7 @@ fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
         .arg("--resolve-plugin-config")
         .env_remove("HERDR_PLUGIN_CONFIG_DIR")
         .env("HERDR_BIN_PATH", &herdr)
+        .env("FAKE_HERDR_DIR", dir.path())
         .output()
         .unwrap();
 
@@ -490,6 +534,7 @@ fn a_wedged_config_dir_lookup_degrades_to_the_defaults_inside_the_bound() {
         .arg("--resolve-plugin-config")
         .env_remove("HERDR_PLUGIN_CONFIG_DIR")
         .env("HERDR_BIN_PATH", &herdr)
+        .env("FAKE_HERDR_DIR", dir.path())
         .output()
         .unwrap();
 
@@ -694,15 +739,10 @@ fn open_takes_the_focused_panes_cwd_not_another_panes() {
     // lookup must key on the focused pane's id — a first-entry read would review the
     // decoy's repo.
     let decoy_repo = init_repo(dir.path(), "decoy-repo");
-    fs::write(
-        dir.path().join("panes.json"),
-        format!(
-            r#"{{"result":{{"panes":[{{"pane_id":"w1:p0","foreground_cwd":"{decoy}"}},{{"pane_id":"w1:p1","foreground_cwd":"{focused}"}}]}}}}"#,
-            decoy = decoy_repo.display(),
-            focused = env!("CARGO_MANIFEST_DIR"),
-        ),
-    )
-    .unwrap();
+    panes_with_cwds(
+        dir.path(),
+        &[("w1:p0", &decoy_repo), ("w1:p1", Path::new(env!("CARGO_MANIFEST_DIR")))],
+    );
     let context = serde_json::json!({
         "focused_pane_id": "w1:p1",
         "focused_pane_cwd": dir.path().to_str().unwrap(),
@@ -762,12 +802,12 @@ fn auto_open_takes_the_event_payload_cwd_over_the_live_one() {
     })
     .to_string();
 
-    let output = Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg("auto-open")
+    let output = pane_sh("auto-open")
         .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
         .env("HERDR_BIN_PATH", &herdr)
+        .env("FAKE_HERDR_DIR", dir.path())
+        .env("HERDR_PLUGIN_ROOT", dir.path())
         .env("HERDR_PLUGIN_CONTEXT_JSON", &context)
         .env("HERDR_PLUGIN_EVENT_JSON", &event)
         .output()
@@ -810,12 +850,12 @@ fn auto_open_passes_no_focus() {
     })
     .to_string();
 
-    let output = Command::new("bash")
-        .arg("herdr/pane.sh")
-        .arg("auto-open")
+    let output = pane_sh("auto-open")
         .env("HERDR_REVIEWR_BIN", reviewr_bin())
         .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
         .env("HERDR_BIN_PATH", &herdr)
+        .env("FAKE_HERDR_DIR", dir.path())
+        .env("HERDR_PLUGIN_ROOT", dir.path())
         .env("HERDR_PLUGIN_EVENT_JSON", &event)
         .output()
         .unwrap();
@@ -825,6 +865,48 @@ fn auto_open_passes_no_focus() {
     let tokens: Vec<&str> = calls.split_whitespace().collect();
     assert!(tokens.contains(&"--no-focus"), "auto-open must pass --no-focus: {calls}");
     assert!(!tokens.contains(&"--focus"), "auto-open must not pass --focus: {calls}");
+}
+
+// --- Pane entrypoint (specs/herdr-host.md, Pane identity): which of the manifest's two pane
+// entrypoints an open names, and what the launched process needs to resolve its binary.
+
+#[cfg(unix)]
+#[test]
+fn an_open_names_the_shell_entrypoint_and_leaves_the_panes_env_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+
+    let output = run_open(dir.path(), &herdr);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap();
+    // The `pane` entrypoint expands `$HERDR_PLUGIN_ROOT` in a shell and `exec`s the binary over
+    // it, so the pane's foreground process is the review UI with no PATH arrangement at all.
+    assert!(calls.contains("--entrypoint pane --placement"), "{calls}");
+    assert!(!calls.contains("--env"), "the unix pane resolves its binary by path: {calls}");
+}
+
+#[cfg(windows)]
+#[test]
+fn an_open_names_the_shell_free_entrypoint_and_puts_the_plugin_bin_first_on_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let (herdr, log) = fake_herdr(dir.path());
+
+    let output = run_open(dir.path(), &herdr);
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let calls = fs::read_to_string(&log).unwrap();
+    // Windows has no `exec` that replaces a process image, so a shell entrypoint would survive
+    // as the pane's foreground process and identity would read `sh` forever. `pane-windows`
+    // names the binary bare, which only resolves if the open hands the launched process a PATH
+    // led by the plugin's own `bin` (specs/herdr-host.md, Pane identity).
+    assert!(calls.contains("--entrypoint pane-windows"), "{calls}");
+    let path = calls.split("--env PATH=").nth(1).unwrap_or_else(|| panic!("no pane PATH: {calls}"));
+    let first = path.split(';').next().unwrap();
+    assert!(
+        first.ends_with("\\bin"),
+        "the plugin bin must lead the pane's PATH, in native spelling: {first}"
+    );
 }
 
 #[test]

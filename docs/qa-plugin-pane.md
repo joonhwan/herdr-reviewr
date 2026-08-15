@@ -1,8 +1,8 @@
 # 플러그인 pane 수동 테스트 가이드 (Windows)
 
 herdr 플러그인으로서의 `toggle` / `open` / `close` 액션과 `worktree.created` 자동 열기를 확인하는
-절차입니다. Windows에서 처음 도는 경로라서, 여기 적힌 것 대부분은 자동 테스트가 아직 덮지 못합니다
-(`tests/pane_actions.rs`가 `#![cfg(unix)]`).
+절차입니다. `tests/pane_actions.rs`가 이제 Windows에서도 돌지만, 거기서 herdr는 가짜입니다 — 호스트가
+프로세스 트리를 어떻게 보고하느냐, pane이 실제로 어디에 열리느냐는 여기서만 확인됩니다.
 
 **pane을 여는 것은 사람의 키스트로크입니다.** 이 문서의 열기 단계는 전부 직접 누르셔야 합니다.
 스크립트로 열면 `HERDR_WORKSPACE_ID`를 무시하고 지금 보고 있는 workspace에 pane이 쌓입니다.

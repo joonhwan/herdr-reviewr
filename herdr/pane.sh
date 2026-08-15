@@ -162,7 +162,13 @@ is_reviewr_pane() {
 # per-pane reads run concurrently, so the sweep costs one process-info round-trip of
 # wall clock, not one per pane in the workspace. Each probe reports through a marker
 # file keyed by its position in the list, so nothing rests on a pane id's spelling.
-pane_list=$(printf '%s' "$panes_json" | jq -r '.result.panes[].pane_id // empty' 2>/dev/null)
+# `tr -d '\r'` because this is the one jq read here that spans lines. Windows jq writes its
+# output through a text-mode handle, so every line ends CRLF. A single-value read loses that CR
+# with the trailing newline command substitution strips; a multi-line read keeps one on every
+# line but the last, and a pane id carrying a stray CR names a pane herdr does not have. The
+# probe would read every pane but the last as "not reviewr" — a close would miss them and a
+# toggle would stack a duplicate beside them.
+pane_list=$(printf '%s' "$panes_json" | jq -r '.result.panes[].pane_id // empty' 2>/dev/null | tr -d '\r')
 probe_dir=$(mktemp -d) || refuse "cannot create a temp dir"
 trap 'rm -rf "$probe_dir"' EXIT
 i=0

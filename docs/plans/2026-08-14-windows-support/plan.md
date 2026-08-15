@@ -4,10 +4,9 @@ No spec governs Windows yet. `herdr-plugin.toml` declares `platforms = ["macos",
 `src/proc.rs` states the assumption outright: "Both shipped platforms are unix." This plan records
 what a live Windows investigation established, and proposes the spec edits each phase needs.
 
-**Status: Phase 1 landed, Phase 2 landed but for its tests.** D1 and D2 are decided. D3 remains
-open and gates nothing in flight. Phase 2 item 4 — porting `tests/pane_actions.rs` and
-`tests/send_flow.rs` off `#![cfg(unix)]` — is the one piece outstanding, so `pane.sh` runs on
-Windows with no automated coverage there.
+**Status: Phases 1 and 2 landed. Phase 3 is next.** D1 and D2 are decided. D3 remains open and
+gates nothing in flight. `pane_actions` and `send_flow` now run on all three platforms — 677 tests
+on Windows, up from 647 — and porting them found B6, a live defect in the pane sweep.
 
 ## Goal
 
@@ -103,20 +102,21 @@ background jobs with `wait`, `$'\n'` quoting, and `ln -sfn`. Three Windows defec
 | B1  | `is_reviewr_pane` matches `argv0`/`argv[0]` basename against `herdr-reviewr`; the Windows binary is `herdr-reviewr.exe`. | **Resolved 2026-08-15**, in two layers. The spelling was worse than assumed: a live pane reports `argv0` as a full path in **backslashes** (`C:\Users\…\claude.EXE`), so the `split("/")` basename returned the whole string and matched nothing. Fixing that was necessary and not sufficient — see B5, which is what actually broke the toggle. |
 | B5  | The pane's foreground process is the launcher, not the review UI.                                      | **Found by QA 2026-08-15, resolved.** The manifest launched the pane as `sh -c 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr"'`. Windows has no `exec` that replaces a process image, so MSYS spawns and waits: the pane's process tree ran four deep (scoop `sh` shim → git `sh` → git `bash` → the binary) and herdr reported only the top. Identity read `sh` and every toggle opened another pane. The shim's `cwd` is `C:\WINDOWS\`, which is the same defect surfacing as `not a git repo: 'C:\WINDOWS\'` when a reviewr pane held focus. Fixed by removing the launcher on Windows: a `platforms = ["windows"]` pane entrypoint names the binary bare, and `pane.sh` puts the plugin's `bin` on the launched process's `PATH` through `plugin pane open --env`. The unix entrypoint is untouched. |
 | B2  | Repo discovery reads `.foreground_cwd`; `pane list` on Windows omits the field.                        | **Resolved 2026-08-15.** The field is absent from every pane, confirmed. The fallback works: an invoked action's `HERDR_PLUGIN_CONTEXT_JSON` carries `focused_pane_cwd` as a native path. No code change needed. |
+| B6  | The pane list is parsed with `jq`, and the Windows build of `jq` writes CRLF.                          | **Found by the ported tests 2026-08-15, resolved.** `pane_list` is the one multi-line `jq` read in `pane.sh`. A single-value read survives it — command substitution strips the trailing CR along with the newline — but a multi-line read keeps a CR on every line but the last, so every pane but the last was probed under an id herdr does not have and read as "not a reviewr pane". A `close` walked past its pane; a `toggle` stacked a second one. Fixed with `tr -d '\r'` on that read. QA missed it because it only ever bites a workspace whose reviewr pane is not last in the listing, and it is the answer to "what could the 28 tests have caught that QA did not" — the inverse of B5. |
 | B3  | `install.sh` and `pane.sh` maintain `ln -sfn` symlinks under `$HOME/.local/…`.                         | Windows symlinks need Developer Mode or elevation, and the path convention is `%LOCALAPPDATA%`. Note the inverse of the macOS hazard in `CLAUDE.md`: a running `.exe` is **locked**, so replacement needs rename-then-replace, not in-place copy. |
 
 `tests/pane_actions.rs` holds 28 tests driving `pane.sh` against a fake herdr, covering exactly the
 subtle contracts (race-lost close converging, unreadable read refusing, shape-missing refusing, live
-cwd precedence). Its first line is `#![cfg(unix)]`, so **none of them compiles on Windows.**
+cwd precedence). Its first line was `#![cfg(unix)]`, so **none of them compiled on Windows.**
 
-`tests/send_flow.rs` is `#![cfg(unix)]` too — corrected 2026-08-14, having been listed above as
-part of the passing integration run. It contributes 0 tests on Windows, so the integration total
-there is 367 from `app_flow`, `git_repo`, `render`, and `pr_candidates` alone. This matters more
-than `pane_actions`: Send is the export path a Windows user reaches without the plugin, and it is
-now unit-covered but not end-to-end covered. It is unix-only because it writes its fake herdr as a
-shell script through `PermissionsExt`. Porting it needs a fake herdr Windows can execute, which is
-the same problem Phase 2 item 4 solves for `pane_actions`, so it joins that item rather than
-Phase 1.
+`tests/send_flow.rs` was `#![cfg(unix)]` too — corrected 2026-08-14, having been listed above as
+part of the passing integration run. It contributed 0 tests on Windows, so the integration total
+there was 367 from `app_flow`, `git_repo`, `render`, and `pr_candidates` alone. That mattered more
+than `pane_actions`: Send is the export path a Windows user reaches without the plugin, and it was
+unit-covered but not end-to-end covered. Both were unix-only for one reason — each wrote its fake
+herdr as a shell script through `PermissionsExt` — so both were fixed by the same move to a fake
+herdr binary (Phase 2, item 4). The integration total on Windows is now 397, and the whole suite
+677.
 
 ### herdr socket API
 
@@ -205,9 +205,21 @@ scopes.
    falls back to copying and a copy is the stale build that block exists to prevent.
 3. **Done.** `platforms` carries `"windows"`. The pane command already used `sh -c`, so only the
    actions, the event, and the build step changed.
-4. **Outstanding.** Port the 28 `pane_actions` tests and the `send_flow` suite off `#![cfg(unix)]`.
-   Both write their fake herdr as a shell script through `PermissionsExt`; a `.cmd` fake reached
-   through `HERDR_BIN_PATH` (`src/herdr.rs:78`) works on Windows and serves both suites.
+4. **Done 2026-08-15.** Both suites run on all three platforms. The fake herdr is now one binary,
+   `tests/support/fake_herdr.rs`, behind a `test-support` feature so a `cargo install` of the
+   crate still resolves to `herdr-reviewr` alone; `just test`, `just lint`, and CI all pass
+   `--all-features`, and a run without it fails by name rather than skipping.
+
+   **The `.cmd` route recorded here does not work**, and it was the plan's own assumption. Rust
+   refuses to pass a batch file any argument holding a newline (its CVE-2024-24576 escaping),
+   which is exactly the shape of a bracketed-paste payload, so a `.cmd` shim serves `pane_actions`
+   and fails every `send_flow` send. A shell script fails earlier still: Windows has no shebang,
+   so `Command::new` on one returns "not a valid Win32 application" — which is why the two tests
+   that spawn the review binary directly needed the fake to be a binary too.
+
+   Windows-only assertions joined at the same time: that an open names the `pane-windows`
+   entrypoint and leads the pane's `PATH` with the plugin's `bin`, and that no stable launch path
+   is created. Their unix halves stayed as they were, cfg-split rather than deleted.
 
 Verified on Windows 11 10.0.26200. The `close` action ran end to end through the real herdr,
 exiting 0 with `close: nothing open in <workspace>`, exercising the `sh`-to-`bash` chain, config
@@ -216,12 +228,14 @@ and `base` against a real Windows `argv0`. The user then ran the toggle by hand:
 `opened wN:p9 (split) in wN` and the next logged `closed wN:p9 in wN`, the same pane, which is the
 acceptance condition for this phase.
 
-QA drove the whole of B5 out. No test could have: the defect lives in how the host reports a
-process tree, which every suite fakes.
+The user then ran `docs/qa-plugin-pane.md` T1 through T8 by hand, all passing: idempotent open,
+converging close, the refusal outside a repository, the `worktree.created` event, the four
+placements, and the absence of stable-path copies.
 
-Still unrun: T3 through T8 of `docs/qa-plugin-pane.md` — idempotent open, converging close, the
-refusal outside a repository, the `worktree.created` event, the four placements, and the absence of
-stable-path copies.
+The two halves each caught what the other could not, which is the lesson to keep. QA drove the
+whole of B5 out, and no test could have: that defect lives in how the host reports a process tree,
+which every suite fakes. The ported tests then drove out B6, and QA could not have: that one needs
+a workspace whose reviewr pane is not last in the listing, and every hand test so far had it last.
 
 **Done when:** toggle/open/close and the `worktree.created` event behave per
 `specs/herdr-host.md` on Windows; the pane-identity tests run on all three platforms; a second
@@ -274,6 +288,7 @@ Written when the phase lands, not before — several are still open decisions.
 | `src/git.rs`, `src/world.rs`  | test fixtures only                                 |
 | `Cargo.toml`                  | `cfg(windows)` dependency per D1                   |
 | `herdr/pane.sh`, `herdr-plugin.toml` | per D2                                      |
-| `tests/pane_actions.rs`       | drop `#![cfg(unix)]`                               |
+| `tests/pane_actions.rs`, `tests/send_flow.rs` | drop `#![cfg(unix)]`               |
+| `tests/support/fake_herdr.rs` | the fake herdr, as a binary both suites share      |
 | `herdr/install.sh`, `.github/workflows/release.yml` | Windows targets and packaging  |
 | `docs/herdr-api-notes.md`     | Socket API section (landed with this plan)          |

@@ -1,13 +1,10 @@
 //! End-to-end send dispatch through a fake herdr binary (`specs/herdr-host.md`,
 //! `specs/input.md`). This file is its own test process, so the HERDR_* environment it
 //! sets can never leak into another test binary, and no real herdr pane is ever addressed.
-#![cfg(unix)]
-
 mod common;
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use common::{Repo, app_on};
@@ -30,30 +27,30 @@ const ONE_AGENT: &str = r#"{"result":{"agents":[
   {"agent":"claude","agent_status":"idle","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8","cwd":"/w/one"}
 ]}}"#;
 
-/// A fake herdr: answers `agent list` from `agents.json`, `tab list` with one label, logs
-/// every invocation, and succeeds at everything else (`pane send-text`, `pane focus`). It
-/// fails whatever `fail` holds, so a dead pane and a broken enumeration both have a shape.
-fn write_fake_herdr(dir: &Path) -> PathBuf {
-    let script = dir.join("herdr");
-    fs::write(
-        &script,
-        "#!/bin/sh\n\
-         dir=$(dirname \"$0\")\n\
-         echo \"$@\" >> \"$dir/log\"\n\
-         case \"$*\" in\n\
-           $(cat \"$dir/fail\" 2>/dev/null || echo __none__)*)\n\
-             echo '{\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane w8:p1 not found\"},\"id\":\"cli:request\"}' >&2\n\
-             exit 1 ;;\n\
-         esac\n\
-         case \"$1 $2\" in\n\
-           \"agent list\") cat \"$dir/agents.json\" ;;\n\
-           \"tab list\") echo '{\"result\":{\"tabs\":[{\"tab_id\":\"w8:t1\",\"label\":\"Grip\"}]}}' ;;\n\
-           *) : ;;\n\
-         esac\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    script
+/// The fake herdr this suite swaps in for the real one: it answers `agent list` from
+/// `agents.json`, `tab list` with one label, logs every invocation, and succeeds at everything
+/// else (`pane send-text`, `agent focus`). It fails whatever `fail` holds, so a dead pane and a
+/// broken enumeration both have a shape. Its source and the whole contract are in
+/// `tests/support/fake_herdr.rs`.
+///
+/// The fake is a binary target behind the `test-support` feature, so that a `cargo install` of
+/// this crate resolves default features and installs the review binary alone. Every runner that
+/// owns the suite — `just test`, `just lint`, CI — passes `--all-features`.
+///
+/// The existence check is the whole point of this function: cargo defines
+/// `CARGO_BIN_EXE_fake-herdr` for a declared binary whether or not its required features let it
+/// build, so without the file itself a run would fail deep inside a send assertion and read as a
+/// broken Send rather than a missing fixture.
+const FAKE_HERDR: Option<&str> = option_env!("CARGO_BIN_EXE_fake-herdr");
+
+fn fake_herdr() -> &'static str {
+    let bin = FAKE_HERDR.expect("cargo names every declared binary target");
+    assert!(
+        Path::new(bin).exists(),
+        "the fake herdr is not built: it sits behind the `test-support` feature — run \
+         `just test`, or `cargo test --features test-support --test send_flow`",
+    );
+    bin
 }
 
 /// Make the fake herdr exit non-zero for every invocation starting with `prefix`.
@@ -89,7 +86,6 @@ fn press(app: &mut App, code: KeyCode, area: Rect, keymap: &Keymap) {
 fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     if env::var("SEND_FLOW_CHILD").is_err() {
         let staging = tempfile::TempDir::new().expect("tempdir");
-        let script = write_fake_herdr(staging.path());
         let out = std::process::Command::new(env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -98,7 +94,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
             ])
             .env("SEND_FLOW_CHILD", "1")
             .env("FAKE_HERDR_DIR", staging.path())
-            .env("HERDR_BIN_PATH", &script)
+            .env("HERDR_BIN_PATH", fake_herdr())
             .env("HERDR_WORKSPACE_ID", "w8")
             .env("HERDR_PANE_ID", "w8:p9")
             .output()

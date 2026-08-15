@@ -46,6 +46,20 @@ opener = "0.8.5"
 [dev-dependencies]
 tempfile = "3"
 
+# Test scaffolding, never a shipped capability. `just test`, `just lint`, and CI all pass
+# `--all-features`, so the fake below builds for every test run; a plain `cargo install` resolves
+# default features only and installs `herdr-reviewr` alone.
+[features]
+test-support = []
+
+# The fake herdr `tests/send_flow.rs` swaps in for the real one (`src/herdr.rs` spawns
+# `$HERDR_BIN_PATH`). A binary target rather than a shell script because Windows has no shebang,
+# and rather than an example because `cargo test --test send_flow` does not build examples.
+[[bin]]
+name = "fake-herdr"
+path = "tests/support/fake_herdr.rs"
+required-features = ["test-support"]
+
 [lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"

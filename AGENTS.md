@@ -6,7 +6,7 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 
 ## Commands
 
-- `just test` — full test suite. Single test: `cargo test <name>` (unit tests live beside the code, integration tests in `tests/`: `cargo test --test app_flow <name>`).
+- `just test` — full test suite. Single test: `cargo test <name>` (unit tests live beside the code, integration tests in `tests/`: `cargo test --test app_flow <name>`). `pane_actions` and `send_flow` drive a fake herdr binary that sits behind the `test-support` feature, so run those two through `just test` or add `--features test-support` — without it they fail by name rather than skipping.
 - `just lint` — clippy with warnings as errors. `just fmt` / `just fmt-check` — rustfmt.
 - `just ci` — exactly what CI runs (fmt-check, lint, test, release build).
 - `just qa-install` — put a local build into the user's real herdr panes. See "QA install" below before using it.
