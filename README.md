@@ -35,7 +35,8 @@ GitLab, or Azure DevOps and never posts.
 - **herdr ≥ 0.7.5** (the plugin system).
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
-- **macOS or Linux.**
+- **macOS, Linux, or Windows.** On Windows the pane actions run under `sh`, so Git for Windows must
+  put one on `PATH` — check with `where sh`. The binary itself runs without it.
 - **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
 
 ## Install
@@ -422,9 +423,13 @@ The known constraints:
 - **Box-drawing glyphs required**, but no Nerd Font.
 
 **Platform**
-- **macOS and Linux only** — no Windows.
-- **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`. With none installed it
-  says so, and **Send** still works.
+- **Windows needs `sh` on `PATH`** for the pane actions — Git for Windows ships one, but its
+  default install leaves it out of `PATH`. Without it, toggle, open, and close do nothing. The
+  binary run on its own is unaffected.
+- **Windows keeps no stable launch path** — the `~/.local` links other platforms maintain need
+  symlinks, so an uninstalled plugin leaves nothing behind rather than a stale copy.
+- **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`, and the system clipboard
+  directly on Windows. With none installed it says so, and **Send** still works.
 
 **herdr coupling**
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and

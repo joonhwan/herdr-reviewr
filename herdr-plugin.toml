@@ -5,43 +5,66 @@ version = "0.30.4"
 # membership, and `cwd` is only verified present from 0.7.5 (docs/herdr-api-notes.md). On an
 # older herdr every agent would parse with no `cwd`, and `last turn` would never track.
 min_herdr_version = "0.7.5"
-platforms = ["macos", "linux"]
+platforms = ["macos", "linux", "windows"]
 description = "Review agent-written diffs beside the chat and add line comments to the agent input."
 
 # On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform from
 # the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed). Skipped by
 # `herdr plugin link` — for a local checkout, build it yourself with `cargo install --path .`.
 [[build]]
-command = ["bash", "herdr/install.sh"]
+command = ["sh", "-c", "exec bash herdr/install.sh"]
 
 # The plugin pane runs the downloaded binary by absolute path under the plugin root, since the
 # pane's cwd is the repo under review (not the plugin root) and the binary isn't on PATH. The
 # toggle action's placement is configurable (default: right split); see herdr/pane.sh.
+#
+# The shell here is not a convenience: it expands `$HERDR_PLUGIN_ROOT`, which the host does not,
+# and `exec` then replaces it so the pane's foreground process is the binary itself. Pane identity
+# depends on that replacement (specs/herdr-host.md, Pane identity).
 [[panes]]
 id = "pane"
 title = "reviewr"
 placement = "split"
+platforms = ["macos", "linux"]
 command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-reviewr\""]
 
+# Windows has no `exec` that replaces a process image, so the shell above would survive as the
+# pane's foreground process and identity would read `sh` forever. This entrypoint names the binary
+# with no shell at all; `herdr/pane.sh` puts the plugin's `bin` directory on the launched process's
+# `PATH` so the bare name resolves.
+[[panes]]
+id = "pane-windows"
+title = "reviewr"
+placement = "split"
+platforms = ["windows"]
+command = ["herdr-reviewr"]
+
+# Every entry point reaches bash through `sh`, never by naming `bash` directly. herdr resolves a
+# command's first word on PATH, and on Windows that PATH carries `C:\Windows\system32\bash.exe` —
+# the WSL launcher, a separate filesystem namespace that receives none of the `HERDR_*` variables
+# (WSL passes only what `WSLENV` lists). `sh` reaches a real POSIX shell on all three platforms,
+# and inside it `bash` resolves to that shell's own bash. An action id carries one command for
+# every platform: herdr honors a per-action `platforms` key but rejects a duplicate action id, so
+# there is no per-platform variant to switch on.
 [[actions]]
 id = "toggle"
 title = "reviewr: toggle pane"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "toggle"]
+command = ["sh", "-c", "exec bash herdr/pane.sh toggle"]
 
 [[actions]]
 id = "open"
 title = "reviewr: open pane"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "open"]
+command = ["sh", "-c", "exec bash herdr/pane.sh open"]
 
 [[actions]]
 id = "close"
 title = "reviewr: close pane"
 contexts = ["pane", "workspace"]
-command = ["bash", "herdr/pane.sh", "close"]
+command = ["sh", "-c", "exec bash herdr/pane.sh close"]
 
 # Auto-open a reviewr pane for a freshly created worktree (gated by auto_open; see herdr/pane.sh).
 [[events]]
 on = "worktree.created"
-command = ["bash", "herdr/pane.sh", "auto-open"]
+command = ["sh", "-c", "exec bash herdr/pane.sh auto-open"]

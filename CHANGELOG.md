@@ -9,8 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **Windows, standalone.** `cargo run` in a Windows repo browses every scope, copies comments,
   and opens PR links. Tool lookup now understands `PATHEXT`, so a program shipped as `.exe`,
-  `.cmd`, or `.bat` is found where the old probe saw nothing. This covers the binary run on its
-  own; the herdr plugin pane stays macOS and Linux for now.
+  `.cmd`, or `.bat` is found where the old probe saw nothing.
+- **Windows, as a herdr plugin.** The pane actions — toggle, open, close, and the new-worktree
+  auto-open — run on Windows. They need `sh` on `PATH`, which Git for Windows ships but its
+  default install leaves out; without one the actions do nothing. A second toggle closes the pane
+  the first one opened, rather than stacking another beside it.
 
 ### Fixed
 - **Copying non-ASCII comments on Windows.** Copy writes the clipboard directly instead of piping

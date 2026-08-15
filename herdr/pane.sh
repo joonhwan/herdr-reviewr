@@ -19,6 +19,13 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 mode="${1:-toggle}"
 H="${HERDR_BIN_PATH:-herdr}"
 
+# Windows differs in two places only: it keeps no stable launch path, and it launches the pane
+# through its own entrypoint (both below).
+case "$(uname -s 2>/dev/null)" in
+MINGW* | MSYS* | CYGWIN*) is_windows=1 ;;
+*) is_windows=0 ;;
+esac
+
 # Validate the whole plugin config before reading workspace state or taking any action. The Rust
 # binary owns TOML parsing and defaults, so every plugin entry point shares exactly one contract.
 if [ -n "${HERDR_REVIEWR_BIN:-}" ]; then
@@ -52,7 +59,12 @@ auto_open=$(cfg_field auto_open) || unreadable_config
 # the build step runs in a staging checkout that herdr renames afterwards, so only a runtime
 # invocation knows the real root (specs/herdr-host.md, Install paths). Best effort — never
 # fails an action, and never replaces anything but a symlink.
-if [ -n "${HERDR_PLUGIN_ROOT:-}" ] && [ -x "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" ]; then
+#
+# Windows keeps no such path (specs/herdr-host.md, Install paths). `ln -s` there needs Developer
+# Mode or elevation, and MSYS silently falls back to copying, which is the one outcome the stable
+# path exists to prevent: a copy is a stale build that keeps launching after an uninstall.
+if [ "$is_windows" -eq 0 ] &&
+  [ -n "${HERDR_PLUGIN_ROOT:-}" ] && [ -x "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" ]; then
   for link_dir in "$HOME/.local/state/herdr/plugins/persiyanov.reviewr/bin" "$HOME/.local/bin"; do
     if [ "$link_dir" = "$HOME/.local/bin" ] && [ ! -d "$link_dir" ]; then
       continue
@@ -123,8 +135,18 @@ is_reviewr_pane() {
   # No `?` after the key path: an envelope missing `foreground_processes` is a shape
   # failure and must refuse, never read as "no reviewr pane" — only a present-but-empty
   # process list may count zero.
+  # `base` normalizes a launch spelling to a bare executable name. It splits on both
+  # separators: Windows reports `argv0` as a full path in backslashes
+  # (`C:\Users\me\bin\herdr-reviewr.exe`), which a `/`-only split returns whole, matching
+  # nothing. `\u005c` spells that backslash, since the literal survives neither the shell
+  # quoting nor jq's own string escape cleanly. The `.exe` test is case-insensitive because
+  # the filesystem decides that suffix's case, but the name itself still compares exactly —
+  # on unix two spellings that differ in case are two different files.
   count=$(printf '%s' "$info" | jq -r '
-    def base: split("/") | last;
+    def base:
+      split("/") | last
+      | split("\u005c") | last
+      | (if (ascii_downcase | endswith(".exe")) then .[0:-4] else . end);
     [.result.process_info.foreground_processes[]
       | select((((.argv0 // "") | base) == "herdr-reviewr")
           or ((((.argv // [])[0] // "") | base) == "herdr-reviewr"))
@@ -271,7 +293,21 @@ overlay)
   ;;
 esac
 
-open_json=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint pane \
+# Windows launches its own entrypoint, which names the binary with no shell so that the pane's
+# foreground process is the review UI itself (specs/herdr-host.md, Pane identity). That entrypoint
+# carries a bare name, so the launched process needs the plugin's `bin` on its `PATH`. Both paths
+# convert to native form: `HERDR_PLUGIN_ROOT` arrives extended-length (`\\?\D:\…`), which no PATH
+# entry may carry, and `$PATH` here is this shell's POSIX view of it.
+entrypoint=pane
+if [ "$is_windows" -eq 1 ]; then
+  entrypoint=pane-windows
+  bin_dir=$(cygpath -w "${HERDR_PLUGIN_ROOT:-}/bin" 2>/dev/null) || bin_dir=""
+  rest=$(cygpath -w -p "$PATH" 2>/dev/null) || rest=""
+  [ -n "$bin_dir" ] || refuse "cannot resolve the plugin bin directory"
+  set -- "$@" --env "PATH=$bin_dir${rest:+;$rest}"
+fi
+
+open_json=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint "$entrypoint" \
   "$@" --cwd "$cwd" "$focus" 2>/dev/null)
 new=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
 [ -n "$new" ] || refuse "herdr plugin pane open failed"

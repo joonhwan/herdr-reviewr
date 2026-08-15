@@ -4,7 +4,10 @@ No spec governs Windows yet. `herdr-plugin.toml` declares `platforms = ["macos",
 `src/proc.rs` states the assumption outright: "Both shipped platforms are unix." This plan records
 what a live Windows investigation established, and proposes the spec edits each phase needs.
 
-**Status: Phase 1 landed.** D1 is decided. D2 and D3 remain open and gate Phases 2 and 3.
+**Status: Phase 1 landed, Phase 2 landed but for its tests.** D1 and D2 are decided. D3 remains
+open and gates nothing in flight. Phase 2 item 4 — porting `tests/pane_actions.rs` and
+`tests/send_flow.rs` off `#![cfg(unix)]` — is the one piece outstanding, so `pane.sh` runs on
+Windows with no automated coverage there.
 
 ## Goal
 
@@ -97,8 +100,9 @@ background jobs with `wait`, `$'\n'` quoting, and `ln -sfn`. Three Windows defec
 
 | id  | defect                                                                                                | status                                                                                                    |
 | --- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| B1  | `is_reviewr_pane` matches `argv0`/`argv[0]` basename against `herdr-reviewr`; the Windows binary is `herdr-reviewr.exe`. | **Unverified.** A live `claude` pane here reports `argv0: "claude"` with `name: "claude.exe"`, so `argv0` echoes the launch spelling. An absolute-path launch would carry `.exe`; a shim launch would not. Must be checked live. A case-insensitive `.exe` strip is safe either way. |
-| B2  | Repo discovery reads `.foreground_cwd`; `pane list` on Windows omits the field.                        | Verified absent in this workspace. Falls back to `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_cwd`; that path is unverified. A failure here refuses the open outright. |
+| B1  | `is_reviewr_pane` matches `argv0`/`argv[0]` basename against `herdr-reviewr`; the Windows binary is `herdr-reviewr.exe`. | **Resolved 2026-08-15**, in two layers. The spelling was worse than assumed: a live pane reports `argv0` as a full path in **backslashes** (`C:\Users\…\claude.EXE`), so the `split("/")` basename returned the whole string and matched nothing. Fixing that was necessary and not sufficient — see B5, which is what actually broke the toggle. |
+| B5  | The pane's foreground process is the launcher, not the review UI.                                      | **Found by QA 2026-08-15, resolved.** The manifest launched the pane as `sh -c 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr"'`. Windows has no `exec` that replaces a process image, so MSYS spawns and waits: the pane's process tree ran four deep (scoop `sh` shim → git `sh` → git `bash` → the binary) and herdr reported only the top. Identity read `sh` and every toggle opened another pane. The shim's `cwd` is `C:\WINDOWS\`, which is the same defect surfacing as `not a git repo: 'C:\WINDOWS\'` when a reviewr pane held focus. Fixed by removing the launcher on Windows: a `platforms = ["windows"]` pane entrypoint names the binary bare, and `pane.sh` puts the plugin's `bin` on the launched process's `PATH` through `plugin pane open --env`. The unix entrypoint is untouched. |
+| B2  | Repo discovery reads `.foreground_cwd`; `pane list` on Windows omits the field.                        | **Resolved 2026-08-15.** The field is absent from every pane, confirmed. The fallback works: an invoked action's `HERDR_PLUGIN_CONTEXT_JSON` carries `focused_pane_cwd` as a native path. No code change needed. |
 | B3  | `install.sh` and `pane.sh` maintain `ln -sfn` symlinks under `$HOME/.local/…`.                         | Windows symlinks need Developer Mode or elevation, and the path convention is `%LOCALAPPDATA%`. Note the inverse of the macOS hazard in `CLAUDE.md`: a running `.exe` is **locked**, so replacement needs rename-then-replace, not in-place copy. |
 
 `tests/pane_actions.rs` holds 28 tests driving `pane.sh` against a fake herdr, covering exactly the
@@ -143,10 +147,26 @@ Each changes what gets built. None blocks Phase 1 except D1.
 - **D1 — clipboard mechanism. Decided 2026-08-14: `clipboard-win` behind a `cfg(windows)` gate.**
   The rejected alternative was shipping Phase 1 with no Windows clipboard and leaving Send as the
   only export. Landed in `src/export.rs`; the contract sits in `specs/review-model.md` (export).
-- **D2 — pane lifecycle strategy.** Depend on git-bash plus `jq`; port `pane.sh` to PowerShell; or
-  lift its decision logic into the binary as a subcommand, extending the `--resolve-plugin-config`
-  precedent so one entry point serves every platform. The socket findings favor the third: bash,
-  `jq`, and the parallel probe all become unnecessary, and B1/B2 become typed code.
+- **D2 — pane lifecycle strategy. Decided 2026-08-15: keep `pane.sh`, reach it through `sh`.**
+  Every action, the event, and the build step run `["sh", "-c", "exec bash herdr/… <mode>"]`.
+  The rejected alternatives were a PowerShell port of `pane.sh`, which would maintain the same
+  subtle contracts twice, and lifting its logic into the binary as a subcommand, which stays the
+  robust answer and is deferred rather than dismissed (see below). Measurements that decided it:
+  - herdr resolves a command's first word on `PATH`. On Windows that reaches
+    `C:\Windows\system32\bash.exe`, the **WSL launcher** — a live probe reported
+    `Linux … microsoft-standard-WSL2`. WSL is not a worse shell, it is a different machine:
+    `WSLENV` carried only `TERM`-family variables, so no `HERDR_*` variable crossed, and
+    `pane.sh` would refuse at its workspace-context guard before reaching git or the socket.
+  - `sh` reaches a real POSIX shell on all three platforms, and inside it `bash` resolves to that
+    shell's own bash (`MINGW64_NT`, `/usr/bin/bash`) with `jq` and `git` both on `PATH`.
+  - One action id carries one command for every platform. herdr honors a per-action `platforms`
+    key and enforces it (`platform_unsupported`), but rejects a duplicate action id, so a
+    Windows-only variant of `toggle` would need its own id and break the keybinding.
+  - **The cost, accepted:** `sh` is on `PATH` here only because scoop shimmed it. Git for
+    Windows keeps `sh.exe` in `bin/`, which its default install leaves off `PATH`, while
+    `cmd/` holds only `git.exe` and friends. Where `sh` is missing the actions do nothing.
+    `README.md` states the requirement. Removing it is the binary-subcommand option, which
+    resolves `bash` from git's own location instead of from `PATH`.
 - **D3 — socket transport.** `specs/herdr-host.md` Non-goals records "No herdr socket subscription.
   Turn tracking polls." That decision forbids **subscription** as the turn-tracking mechanism. It
   does not address replacing the subprocess with a socket client for the same polled request/response
@@ -178,15 +198,30 @@ scopes.
 
 ### Phase 2 — plugin pane
 
-1. Verify B1 and B2 live: link the plugin, invoke one action, read `herdr plugin log list`, and
-   record the real `argv0` spelling and the cwd fields herdr provides. **Opening a pane is the
-   user's keystroke** (`CLAUDE.md`); this step must not script pane opens.
-2. Implement D2, resolving B1 and B2.
-3. `herdr-plugin.toml`: add `"windows"` to `platforms`, and give the pane a launch command that
-   needs no POSIX shell.
-4. Port the 28 `pane_actions` tests and the `send_flow` suite off `#![cfg(unix)]`. Under D2's third
-   option the fake herdr becomes a test binary reached through `HERDR_BIN_PATH`, which
-   `src/herdr.rs:78` already honors, and one such binary serves both suites.
+1. **Done.** B1 and B2 verified live by linking the plugin and invoking read-only actions; no pane
+   was opened (`CLAUDE.md`).
+2. **Done.** D2 implemented. `pane.sh` changed in two places only: `base` normalizes the launch
+   spelling (B1), and the stable-launch-path block skips a platform without symlinks, since MSYS
+   falls back to copying and a copy is the stale build that block exists to prevent.
+3. **Done.** `platforms` carries `"windows"`. The pane command already used `sh -c`, so only the
+   actions, the event, and the build step changed.
+4. **Outstanding.** Port the 28 `pane_actions` tests and the `send_flow` suite off `#![cfg(unix)]`.
+   Both write their fake herdr as a shell script through `PermissionsExt`; a `.cmd` fake reached
+   through `HERDR_BIN_PATH` (`src/herdr.rs:78`) works on Windows and serves both suites.
+
+Verified on Windows 11 10.0.26200. The `close` action ran end to end through the real herdr,
+exiting 0 with `close: nothing open in <workspace>`, exercising the `sh`-to-`bash` chain, config
+validation through the binary, the symlink skip, `herdr pane list`, the concurrent per-pane probe,
+and `base` against a real Windows `argv0`. The user then ran the toggle by hand: one press logged
+`opened wN:p9 (split) in wN` and the next logged `closed wN:p9 in wN`, the same pane, which is the
+acceptance condition for this phase.
+
+QA drove the whole of B5 out. No test could have: the defect lives in how the host reports a
+process tree, which every suite fakes.
+
+Still unrun: T3 through T8 of `docs/qa-plugin-pane.md` — idempotent open, converging close, the
+refusal outside a repository, the `worktree.created` event, the four placements, and the absence of
+stable-path copies.
 
 **Done when:** toggle/open/close and the `worktree.created` event behave per
 `specs/herdr-host.md` on Windows; the pane-identity tests run on all three platforms; a second

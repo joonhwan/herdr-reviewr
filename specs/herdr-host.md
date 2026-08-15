@@ -1,7 +1,7 @@
 ---
 Status: Current
 Created: 2026-06-23
-Last edited: 2026-08-14
+Last edited: 2026-08-15
 ---
 
 # herdr host
@@ -26,15 +26,23 @@ The binary paints its empty frame before the first git scan, so the pane never s
 
 A reviewr pane is any pane running the review UI in its foreground process group, read live from herdr at each action and event. A wrapped launch like `cargo run` counts through its child. A flag run like `--resolve-plugin-config` is not the review UI and never counts.
 
+Identity reads the executable name out of the launch spelling, never the spelling itself. A leading directory path counts the same as a bare name, under either separator, and an executable suffix counts the same as none. The name below the suffix still compares exactly.
+
+The pane opens the review UI as the process the host reports, never behind a launcher that outlives it. A host that reports one process per pane would otherwise report the launcher forever, and identity would match nothing. Reading the binary's name out of a launcher's arguments is not the alternative: those arguments are an unexpanded command string, so a pane merely naming the binary would count, and a toggle would close it.
+
 The review run labels its pane `reviewr` when the pane has no label, and a normal exit clears only a `reviewr` label, so a name the user gave the pane survives both ends. The label is display only: a failed write or a stale label changes nothing an action or the event reads.
 
 ## Install paths
 
 The plugin keeps the binary linked at a stable path, `~/.local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr`, and at `~/.local/bin/herdr-reviewr` when that directory exists. The install step creates both, and every action and event re-points them at the live plugin root — the install's build step runs in a staging checkout the host renames afterwards, so only a runtime invocation knows the real root. Both paths are links into the installed plugin, never copies, and neither ever replaces anything but a symlink. A launch after an uninstall fails rather than running a stale build.
 
+A platform that cannot link keeps no stable path at all. Windows is such a platform, and there the actions and the event skip the paths rather than copying the binary into them.
+
 ## Pane actions
 
 Actions bind to keys and to script invocations alike.
+
+Every action and the event run under `sh`, and reach `bash` from inside it. One action id carries one command for every platform, so the host resolves that first word on each. Naming `bash` there would reach a different interpreter per platform.
 
 | action   | pane absent  | pane present    |
 | -------- | ------------ | --------------- |
