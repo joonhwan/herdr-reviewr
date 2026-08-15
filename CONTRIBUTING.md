@@ -39,9 +39,19 @@ painted frame:
 python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture
 ```
 
-Baselines live in `scripts/bench-results/`. For anything touching the reload, render, git, or
-highlight paths, run it before and after under the same system load and put both numbers in the
-PR. `examples/bench_latency.rs` attributes a slow number to its component calls.
+On Windows the pty is ConPTY, reached through `pywinpty`. The script declares that dependency in
+its own PEP 723 block, so run it with a tool that reads one — there is no virtualenv to create:
+
+```bash
+uv run scripts/bench_tui.py --binary target/release/herdr-reviewr.exe --fixture
+```
+
+Baselines live in `scripts/bench-results/`, each stamped with the `pty` it ran on. Compare medians
+only within one platform: a unix pty hands back the child's bytes verbatim, while ConPTY keeps its
+own screen buffer and re-encodes it, so a Windows run and a macOS run measure the same keypress
+over different machinery. For anything touching the reload, render, git, or highlight paths, run
+it before and after under the same system load and put both numbers in the PR.
+`examples/bench_latency.rs` attributes a slow number to its component calls.
 
 ## Pull requests
 

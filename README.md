@@ -35,8 +35,9 @@ GitLab, or Azure DevOps and never posts.
 - **herdr ≥ 0.7.5** (the plugin system).
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
-- **macOS, Linux, or Windows.** On Windows the pane actions run under `sh`, so Git for Windows must
-  put one on `PATH` — check with `where sh`. The binary itself runs without it.
+- **macOS, Linux, or Windows.** On Windows the install step and the pane actions both run under
+  `sh`, so Git for Windows must put one on `PATH` — check with `where sh`. Without it
+  `herdr plugin install` fails and the actions do nothing. The binary itself runs without it.
 - **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
 
 ## Install
@@ -473,7 +474,7 @@ at `bin/herdr-reviewr`:
 ```bash
 git clone https://github.com/persiyanov/herdr-reviewr
 cd herdr-reviewr
-just install   # build release → bin/herdr-reviewr, ad-hoc re-signed on macOS
+just install   # build release → bin/herdr-reviewr (.exe on Windows), ad-hoc re-signed on macOS
 herdr plugin link .
 ```
 

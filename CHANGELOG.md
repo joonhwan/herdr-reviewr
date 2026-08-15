@@ -14,6 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   auto-open — run on Windows. They need `sh` on `PATH`, which Git for Windows ships but its
   default install leaves out; without one the actions do nothing. A second toggle closes the pane
   the first one opened, rather than stacking another beside it.
+- **`herdr plugin install` on Windows.** Releases now carry `x86_64` and `aarch64` Windows
+  builds as zips, and the install step picks the right one, checks its hash, and unpacks it. A
+  reinstall no longer needs the panes closed first: the old binary is renamed aside rather than
+  overwritten, which is the only replacement Windows permits while a pane is running it.
 
 ### Fixed
 - **Closing and toggling a reviewr pane on Windows when the workspace holds several panes.** The

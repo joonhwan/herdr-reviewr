@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = ["pywinpty>=2.0.13; sys_platform == 'win32'"]
+# ///
 """Perceived-latency benchmark for herdr-reviewr.
 
 Drives the real binary through a PTY and measures keypress -> first response
@@ -12,25 +16,48 @@ Usage:
   scripts/bench_tui.py ... --json out.json      # machine-readable results
   scripts/bench_tui.py ... --iterations 12
 
+On Windows the pty is ConPTY, reached through pywinpty, so run it under a tool
+that reads the dependency block above:
+
+  uv run scripts/bench_tui.py --binary target/release/herdr-reviewr.exe --fixture
+
+Compare medians only against runs from the same platform. A unix pty is a pipe
+that hands back the child's bytes verbatim; ConPTY is a renderer that keeps its
+own screen buffer and re-encodes it, so both numbers measure a real keypress-to-
+paint but not the same path. scripts/bench-results/ holds macOS baselines.
+
 The fixture repo is generated deterministically (same content every time) in
 --fixture-dir (default: <scratch>/reviewr-bench-fixture), so numbers are
 comparable across sessions and machines of the same class.
 """
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
-import pty
 import select
 import shutil
-import signal
-import struct
 import subprocess
 import sys
-import termios
+import tempfile
 import time
+
+IS_WINDOWS = sys.platform == "win32"
+
+if IS_WINDOWS:
+    try:
+        import winpty
+    except ImportError:  # pragma: no cover - depends on how the script was launched
+        sys.exit(
+            "bench_tui: needs pywinpty on Windows.\n"
+            "  uv run scripts/bench_tui.py ...   (reads the dependency block above)\n"
+            "  or: pip install pywinpty"
+        )
+else:
+    import fcntl
+    import pty
+    import struct
+    import termios
 
 COLS, ROWS = 160, 45
 # Output gap that ends a frame burst. Must exceed the largest deferred-reload gap: a
@@ -93,16 +120,49 @@ def build_fixture(root):
 
 
 class Session:
+    """The real binary behind a pseudo-terminal, one per benchmarked repo.
+
+    Only opening, reading, and writing the pty differ per platform, so the timing loop below is
+    shared. Windows can share it because pywinpty bridges ConPTY to a socket and exposes its
+    descriptor, and `select` on Windows accepts sockets.
+    """
+
     def __init__(self, binary, repo):
-        self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         env = {**os.environ, "TERM": "xterm-256color"}
         env.pop("HERDR_PLUGIN_CONFIG_DIR", None)  # standalone mode: no plugin config reads
-        self.proc = subprocess.Popen(
-            [binary, repo, "--poll", "600000"],
-            stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
-        )
-        os.close(slave)
+        argv = [binary, repo, "--poll", "600000"]
+        if IS_WINDOWS:
+            self.pty = winpty.PtyProcess.spawn(argv, env=env, dimensions=(ROWS, COLS))
+            self.fd = self.pty.fileno()
+        else:
+            self.master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+            self.proc = subprocess.Popen(
+                argv, stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
+            )
+            os.close(slave)
+            self.fd = self.master
+
+    def _recv(self):
+        """Read whatever is already available. Called only once `select` reports readiness, so
+        it returns promptly on both platforms; b"" means the pty closed."""
+        if IS_WINDOWS:
+            try:
+                # pywinpty decodes to str and joins split UTF-8 sequences for us. Encode back,
+                # so the byte count means the same thing it does on unix.
+                return self.pty.read(65536).encode("utf-8", "replace")
+            except EOFError:
+                return b""
+        try:
+            return os.read(self.master, 65536)
+        except OSError:
+            return b""
+
+    def _send(self, key):
+        if IS_WINDOWS:
+            self.pty.write(key)
+        else:
+            os.write(self.master, key.encode())
 
     def _read_until_quiet(self, quiet_ms, timeout):
         """Drain output until a quiet gap; returns (first_byte_at, last_byte_at, n_bytes)."""
@@ -114,15 +174,12 @@ class Session:
             if now > deadline:
                 break
             wait = quiet_ms / 1000 if last is not None else deadline - now
-            r, _, _ = select.select([self.master], [], [], wait)
+            r, _, _ = select.select([self.fd], [], [], wait)
             if not r:
                 if last is not None:
                     break  # quiet gap after data: frame done
                 continue
-            try:
-                data = os.read(self.master, 65536)
-            except OSError:
-                break
+            data = self._recv()
             if not data:
                 break
             t = time.perf_counter()
@@ -137,18 +194,31 @@ class Session:
     def press(self, key, timeout=30.0):
         """Send a key; return (ms to first response byte, ms to painted frame)."""
         t0 = time.perf_counter()
-        os.write(self.master, key.encode())
+        self._send(key)
         first, last, total = self._read_until_quiet(QUIET_MS, timeout)
         if first is None:
             return None, None
         return (first - t0) * 1000, (last - t0) * 1000
 
     def close(self):
+        if IS_WINDOWS:
+            try:
+                self._send("q")
+                deadline = time.perf_counter() + 3
+                while self.pty.isalive() and time.perf_counter() < deadline:
+                    time.sleep(0.02)
+            except Exception:
+                pass
+            try:
+                self.pty.terminate(force=True)
+            except Exception:
+                pass
+            return
         try:
-            os.write(self.master, b"q")
+            self._send("q")
             self.proc.wait(timeout=3)
         except Exception:
-            self.proc.send_signal(signal.SIGKILL)
+            self.proc.kill()
         os.close(self.master)
 
 
@@ -261,9 +331,7 @@ def main():
 
     targets = []
     if args.fixture:
-        fd = args.fixture_dir or os.path.join(
-            os.environ.get("TMPDIR", "/tmp"), "reviewr-bench-fixture"
-        )
+        fd = args.fixture_dir or os.path.join(tempfile.gettempdir(), "reviewr-bench-fixture")
         print(f"fixture: {fd}", file=sys.stderr)
         build_fixture(fd)
         targets.append((fd, "fixture"))
@@ -277,6 +345,9 @@ def main():
         "binary_mtime": int(os.path.getmtime(args.binary)),
         "source_rev": git_rev(os.path.dirname(os.path.abspath(__file__))),
         "cols": COLS, "rows": ROWS, "quiet_ms": QUIET_MS,
+        # Medians compare across runs of the same pty only, so every result says which it used.
+        "platform": sys.platform,
+        "pty": "conpty" if IS_WINDOWS else "unix",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     out = {"meta": meta, "runs": []}

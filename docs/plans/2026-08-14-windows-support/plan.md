@@ -4,9 +4,10 @@ No spec governs Windows yet. `herdr-plugin.toml` declares `platforms = ["macos",
 `src/proc.rs` states the assumption outright: "Both shipped platforms are unix." This plan records
 what a live Windows investigation established, and proposes the spec edits each phase needs.
 
-**Status: Phases 1 and 2 landed. Phase 3 is next.** D1 and D2 are decided. D3 remains open and
-gates nothing in flight. `pane_actions` and `send_flow` now run on all three platforms — 677 tests
-on Windows, up from 647 — and porting them found B6, a live defect in the pane sweep.
+**Status: all three phases landed.** D1 and D2 are decided. D3 remains open and gates nothing in
+flight. `pane_actions` and `send_flow` now run on all three platforms — 677 tests on Windows, up
+from 647 — and porting them found B6, a live defect in the pane sweep. One condition is still
+unverified and needs a release to reach: `herdr plugin install` on a clean Windows box.
 
 ## Goal
 
@@ -103,7 +104,7 @@ background jobs with `wait`, `$'\n'` quoting, and `ln -sfn`. Three Windows defec
 | B5  | The pane's foreground process is the launcher, not the review UI.                                      | **Found by QA 2026-08-15, resolved.** The manifest launched the pane as `sh -c 'exec "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr"'`. Windows has no `exec` that replaces a process image, so MSYS spawns and waits: the pane's process tree ran four deep (scoop `sh` shim → git `sh` → git `bash` → the binary) and herdr reported only the top. Identity read `sh` and every toggle opened another pane. The shim's `cwd` is `C:\WINDOWS\`, which is the same defect surfacing as `not a git repo: 'C:\WINDOWS\'` when a reviewr pane held focus. Fixed by removing the launcher on Windows: a `platforms = ["windows"]` pane entrypoint names the binary bare, and `pane.sh` puts the plugin's `bin` on the launched process's `PATH` through `plugin pane open --env`. The unix entrypoint is untouched. |
 | B2  | Repo discovery reads `.foreground_cwd`; `pane list` on Windows omits the field.                        | **Resolved 2026-08-15.** The field is absent from every pane, confirmed. The fallback works: an invoked action's `HERDR_PLUGIN_CONTEXT_JSON` carries `focused_pane_cwd` as a native path. No code change needed. |
 | B6  | The pane list is parsed with `jq`, and the Windows build of `jq` writes CRLF.                          | **Found by the ported tests 2026-08-15, resolved.** `pane_list` is the one multi-line `jq` read in `pane.sh`. A single-value read survives it — command substitution strips the trailing CR along with the newline — but a multi-line read keeps a CR on every line but the last, so every pane but the last was probed under an id herdr does not have and read as "not a reviewr pane". A `close` walked past its pane; a `toggle` stacked a second one. Fixed with `tr -d '\r'` on that read. QA missed it because it only ever bites a workspace whose reviewr pane is not last in the listing, and it is the answer to "what could the 28 tests have caught that QA did not" — the inverse of B5. |
-| B3  | `install.sh` and `pane.sh` maintain `ln -sfn` symlinks under `$HOME/.local/…`.                         | Windows symlinks need Developer Mode or elevation, and the path convention is `%LOCALAPPDATA%`. Note the inverse of the macOS hazard in `CLAUDE.md`: a running `.exe` is **locked**, so replacement needs rename-then-replace, not in-place copy. |
+| B3  | `install.sh` and `pane.sh` maintain `ln -sfn` symlinks under `$HOME/.local/…`.                         | **Resolved 2026-08-15.** Both skip the stable paths on Windows, where a symlink needs Developer Mode or elevation and MSYS falls back to copying. The lock half is now measured, and it is the inverse of the macOS hazard in `CLAUDE.md`: against a running `.exe` a delete returns access denied and a copy reports the file in use, while a rename succeeds — so every swap renames aside and writes beside. `rm` under Git Bash succeeds only because MSYS emulates unlink with that same rename. |
 
 `tests/pane_actions.rs` holds 28 tests driving `pane.sh` against a fake herdr, covering exactly the
 subtle contracts (race-lost close converging, unreadable read refusing, shape-missing refusing, live
@@ -243,18 +244,46 @@ toggle closes the pane it opened rather than stacking a duplicate.
 
 ### Phase 3 — build, release, QA
 
-1. `.github/workflows/release.yml`: add `x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`, with
-   a zip asset and its `.sha256`.
-2. `herdr/install.sh`: map the Windows targets, unpack a zip, and replace B3's symlinks with a
-   Windows-appropriate install that never overwrites a running binary in place.
-3. `justfile` and `scripts/*.sh`: make `install`, `qa-install`, and `qa-restore` work on Windows, or
-   state plainly that they do not.
-4. `scripts/bench_tui.py` imports `pty`, `fcntl`, and `termios` — Unix-only modules, so it fails at
-   import. Either port it to ConPTY or record that the acceptance instrument is unavailable on
-   Windows and that reload/render/git/highlight changes must be benchmarked on macOS or Linux.
+1. **Done 2026-08-15.** Both Windows targets joined the release matrix. The upload step already
+   defaults to a zip on Windows and a tarball elsewhere, so only the attestation needed the
+   archive name, which now comes from a per-target `ext`. The checksum sidecar keeps one
+   spelling on every platform (`<name>-<target>.sha256`) because each target ships one archive.
+2. **Done 2026-08-15.** `herdr/install.sh` maps the MSYS/Cygwin `uname` families to the two
+   Windows triples, unpacks the zip through `unzip` or System32's bsdtar (the shell's own `tar`
+   is GNU tar and cannot read one), and skips the stable-path symlinks per
+   `specs/herdr-host.md`.
+3. **Done 2026-08-15.** `just install` writes `bin/herdr-reviewr.exe`. `qa-install` and
+   `qa-restore` no longer glob a unix path: `scripts/qa-plugin-bin.sh` asks herdr where the
+   plugin lives, normalizes the `\\?\` spelling it reports on Windows, and refuses a linked
+   checkout.
+4. **Done 2026-08-15.** Ported to ConPTY. pywinpty 3 bridges the pty to a **socket** and exposes
+   its descriptor, and `select` on Windows accepts sockets — so the timing loop is unchanged and
+   shared, and only opening, reading, and writing the pty branch. The dependency is declared in
+   the script's own PEP 723 block, Windows-only by marker, so unix keeps running it with no
+   setup and the repo gains no packaging files.
+
+   **The measurement is sound but not comparable to the existing baselines.** A unix pty is a
+   pipe that returns the child's bytes; ConPTY is a renderer that keeps its own screen buffer
+   and re-encodes it. Measured on this machine, three consecutive 8-iteration runs held their
+   medians within ~1% of each other, and results span 2.5 ms to 520 ms with no floor, so nothing
+   is being clipped to a repaint cadence. First-byte medians sit near 1.0 ms against ~0.4 ms on
+   macOS, and the reload-bound scenarios near 520 ms against ~82 ms. `scripts/bench-results/`
+   entries now carry a `pty` field, and `windows-baseline-5dfc51f.json` is the first Windows one.
+
+Verified on Windows 11 10.0.26200. The install path was exercised end to end against a local
+release fixture — mapping, checksum, zip unpack, and the replacement — including a reinstall over
+a **running** executable, which succeeded while the process kept running. The premise behind that
+replacement was measured rather than assumed: against a live process, a native delete returns
+access denied and a copy over the file reports it in use, while a rename succeeds. Git Bash's `rm`
+does succeed, but only because MSYS emulates unlink with that same rename.
+
+`just install`, `just qa-install`, and `just qa-restore` all ran here. Only `install` completes on
+this machine: the plugin is linked from this checkout rather than installed from GitHub, so the
+other two stop at the refusal that case is supposed to produce.
 
 **Done when:** `herdr plugin install` on a clean Windows box yields a working pane, and
-`docs/qa-install.md` covers the Windows swap.
+`docs/qa-install.md` covers the Windows swap. The doc is written; the clean-box install is the
+one condition still unverified, since it needs a release carrying the new Windows assets.
 
 ## Spec changes
 
@@ -265,7 +294,7 @@ Written when the phase lands, not before — several are still open decisions.
 | `specs/review-model.md`  | **Landed.** The clipboard decision from D1. Not `specs/input.md`, which only maps the `copy` keybinding — the export contract lives with the review model. |
 | `specs/markdown.md`      | **Landed.** A destination reaches the opener as one argument, and the Windows open reports on handoff. Not `specs/forge-host.md`, which never states how a link opens. |
 | `specs/herdr-host.md`    | **Landed.** "clipboard utility" reworded to "clipboard export", since Windows spawns no utility. |
-| `specs/herdr-host.md`    | Pane identity tolerating an executable suffix; install paths on a platform without usable symlinks. D3 if the non-goal is revisited. |
+| `specs/herdr-host.md`    | **Landed.** Pane identity tolerating an executable suffix; install paths on a platform without usable symlinks. D3 stays open if the non-goal is revisited. |
 | `specs/forge-providers.md` | Only if `az` resolution turns out to be a stated contract rather than an implementation detail.           |
 
 ## Out of scope
@@ -274,8 +303,10 @@ Written when the phase lands, not before — several are still open decisions.
 - WSL. A WSL build is a Linux build and already covered.
 - OSC 52 clipboard. Separate decision, own payoff on Linux, blocked by the delivery-signal problem.
 - Turn-tracking subscription. Blocked on D3.
-- `git.exe` performance work. No Windows-specific slowness was observed; the acceptance instrument
-  (Phase 3, item 4) does not run here, so no claim is made either way.
+- `git.exe` performance work. The instrument runs here now, and the fixture's reload-bound
+  scenarios paint in ~520 ms against ~82 ms on macOS. That gap is recorded, not investigated: the
+  two numbers come from different ptys as well as different machines, so it is a question to open
+  with a Windows-to-Windows A/B, not a finding.
 
 ## Likely files
 
