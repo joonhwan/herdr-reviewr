@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.4-win.1] — 2026-08-16
+
+A personal fork build carrying the Windows work below, released so two Windows machines can
+install it with `herdr plugin install joonhwan/herdr-reviewr --ref windows` before the work
+reaches upstream. Identical to upstream 0.30.4 apart from that work; the plugin id is unchanged,
+so switching back to an upstream release keeps the config.
+
 ## [Unreleased]
 
 ### Added

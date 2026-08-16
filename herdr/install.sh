@@ -10,7 +10,8 @@
 set -euo pipefail
 
 NAME="herdr-reviewr"
-REPO="persiyanov/herdr-reviewr"
+# Fork build: the release assets live on this fork, not upstream, until the Windows work merges.
+REPO="joonhwan/herdr-reviewr"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$ROOT/bin"
