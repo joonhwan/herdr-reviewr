@@ -18,6 +18,11 @@ cargo run -- ~/some/repo   # or against any repo
 `just ci` runs exactly what CI runs: format check, clippy with warnings as errors, tests, and a
 release build. Green there means green in CI.
 
+On Windows the recipes run under `sh`, the same requirement the plugin states in `README.md`, and
+nothing beyond it: a recipe that needs more than one shell line calls a script in `scripts/`
+rather than carrying a shebang, because a shebang recipe makes `just` translate a temp path with
+`cygpath` — another Git for Windows tool its default install leaves off `PATH`.
+
 To test a change inside real herdr panes, `just qa-install` swaps your build into the installed
 plugin and `just qa-restore` brings the release back. The details and the sharp edges live in
 `docs/qa-install.md`.

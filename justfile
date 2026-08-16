@@ -30,13 +30,8 @@ run:
 
 # build release and install the binary into bin/ for `herdr plugin link`
 install:
-    #!/usr/bin/env sh
-    set -eu
-    exe=""
-    case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) exe=".exe" ;; esac
     cargo build --release
-    mkdir -p bin
-    ./scripts/swap-binary.sh "target/release/herdr-reviewr$exe" "bin/herdr-reviewr$exe"
+    ./scripts/install.sh
 
 # build release and swap it into the GitHub-installed plugin for local QA (docs/qa-install.md)
 qa-install:
@@ -45,12 +40,7 @@ qa-install:
 
 # restore the released binary the last `just qa-install` replaced
 qa-restore:
-    #!/usr/bin/env sh
-    set -eu
-    bin="$(./scripts/qa-plugin-bin.sh)"
-    ./scripts/swap-binary.sh "$bin.release-backup" "$bin"
-    echo "restored release binary at $bin"
-    echo "next: close and reopen each reviewr pane with the toggle keybinding inside herdr."
+    ./scripts/qa-restore.sh
 
 # everything CI runs, locally
 ci: fmt-check lint test
